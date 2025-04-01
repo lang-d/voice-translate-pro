@@ -1,0 +1,79 @@
+{
+    "app": {
+        "name": "Voice Translate Pro",
+        "version": "1.0.0",
+        "debug": false,
+        "log_level": "INFO"
+    },
+    "system": {
+        "gpu": {
+            "enabled": true,
+            "device": "auto",
+            "memory_fraction": 0.8
+        },
+        "performance": {
+            "use_half_precision": true,
+            "use_jit": true,
+            "num_workers": 4,
+            "batch_size": 32
+        },
+        "cache": {
+            "enabled": true,
+            "base_path": "cache",
+            "max_size": "10GB",
+            "cleanup_threshold": "8GB"
+        }
+    },
+    "audio": {
+        "input": {
+            "sample_rate": 16000,
+            "channels": 1,
+            "chunk_duration": 0.5,
+            "noise_suppression": true
+        },
+        "output": {
+            "sample_rate": 16000,
+            "channels": 1,
+            "volume": 1.0
+        }
+    },
+    "paths": {
+        "models": "models",
+        "data": "data",
+        "output": "output",
+        "logs": "logs"
+    },
+    "user": {
+        "language": {
+            "source": "zh",
+            "target": "en"
+        },
+        "asr": {
+            "engine": "whisper",
+            "model": "base",
+            "language": "zh",
+            "use_cache": true,
+            "cache_path": "cache/asr"
+        },
+        "translation": {
+            "engine": "nllb",
+            "model": "200M",
+            "source_language": "zh",
+            "target_language": "en"
+        },
+        "tts": {
+            "engine": "edge_tts",
+            "voice": "zh-CN-XiaoxiaoNeural",
+            "language": "zh-CN",
+            "speed": 1.0,
+            "use_enhancements": true,
+            "cache_path": "cache/tts"
+        },
+        "ui": {
+            "theme": "light",
+            "font_size": 12,
+            "show_waveform": true,
+            "show_spectrogram": false
+        }
+    }
+}
