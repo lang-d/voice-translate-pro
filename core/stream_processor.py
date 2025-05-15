@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
+import json
 import time
 import threading
 import numpy as np
@@ -103,12 +103,21 @@ class AudioCapture:
             logger.warning(f"音频回调状态: {status}")
             
         try:
+
             # 应用降噪（如果启用）
-            if self.noise_suppression:
-                indata = self._suppress_noise(indata)
+            # if self.noise_suppression:
+            #     indata = self._suppress_noise(indata)
+
+            # 保证音频是一维
+            if indata.ndim == 2:
+                # 只取第一个通道
+                audio_1d = indata[:, 0]
+                # 或者做平均：audio_1d = indata.mean(axis=1)
+            else:
+                audio_1d = indata
                 
             # 调用回调函数
-            self.callback_fn(indata.copy(), time_info)
+            self.callback_fn(audio_1d.copy(), time_info)
         except Exception as e:
             logger.exception(f"音频回调处理失败: {str(e)}")
     
@@ -282,6 +291,8 @@ class ProcessingPipeline:
                     "tts": tts_config
                 }
             }
+
+            logger.info(f"""full config:{json.dumps(full_config)}""")
             
             # 初始化管理器
             if self.asr_manager is None:
@@ -323,7 +334,7 @@ class ProcessingPipeline:
             asr_latency = time.time() - start_time
             self._notify_status(StatusEvent(
                 StatusEventType.LATENCY,
-                {"asr": asr_latency}
+                {"asr_latency": asr_latency}
             ))
             
             if not text:
@@ -335,7 +346,7 @@ class ProcessingPipeline:
             translation_latency = time.time() - start_time
             self._notify_status(StatusEvent(
                 StatusEventType.LATENCY,
-                {"mt": translation_latency}
+                {"mt_latency": translation_latency}
             ))
             
             if not translated_text:
@@ -347,7 +358,7 @@ class ProcessingPipeline:
             tts_latency = time.time() - start_time
             self._notify_status(StatusEvent(
                 StatusEventType.LATENCY,
-                {"tts": tts_latency}
+                {"tts_latency": tts_latency}
             ))
             
             # 存储结果
@@ -458,10 +469,11 @@ class StreamProcessor:
             
             # 解析设备索引
             def get_device_index(device_str):
+
                 if device_str == "default":
                     return None
-                
-                device_data = device_str.split("(")[0].strip()
+
+                device_data = device_str.split(") (")[0].strip()+") ".strip()
                 for i, dev in enumerate(devices):
                     if dev.get('name').strip() == device_data:
                         return i
@@ -482,21 +494,7 @@ class StreamProcessor:
             logger.exception(f"设置音频设备失败: {str(e)}")
             return False
     
-    def set_tts_engine(self, engine: str, model_version: Optional[str] = None):
-        """设置TTS引擎和模型版本 - 此方法需要更复杂的实现"""
-        logger.warning("set_tts_engine方法未实现，请在配置阶段配置TTS引擎")
-        return False
-    
-    def set_asr_engine(self, engine: str, model_version: Optional[str] = None):
-        """设置ASR引擎和模型版本 - 此方法需要更复杂的实现"""
-        logger.warning("set_asr_engine方法未实现，请在配置阶段配置ASR引擎")
-        return False
-    
-    def set_translation_engine(self, engine: str, model_version: Optional[str] = None):
-        """设置翻译引擎和模型版本 - 此方法需要更复杂的实现"""
-        logger.warning("set_translation_engine方法未实现，请在配置阶段配置翻译引擎")
-        return False
-    
+
     def start(self) -> bool:
         """启动流处理"""
         if self.is_running:

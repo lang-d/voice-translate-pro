@@ -75,6 +75,7 @@ class TTSManager:
             
             # 获取用户TTS配置
             tts_config = self.config["user"]["tts"]
+            logger.info(f"""tts config:{json.dumps(tts_config)}""")
             engine_name = tts_config["engine"]
             
             # 根据引擎名称导入对应的引擎类
@@ -84,6 +85,9 @@ class TTSManager:
             elif engine_name == "xtts":
                 from .xtts_engine import XTTSEngine
                 engine_class = XTTSEngine
+            elif engine_name == "f5_tts":
+                from .f5_tts_engine import F5TTSEngine
+                engine_class = F5TTSEngine
             elif engine_name == "bark":
                 from .bark_tts_engine import BarkTTSEngine
                 engine_class = BarkTTSEngine

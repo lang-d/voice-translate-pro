@@ -111,12 +111,12 @@ class Config:
                 },
                 "translation": {
                     "engine": "nllb",
-                    "model": "200M",
+                    "model": "base",
                     "source_language": "zh",
                     "target_language": "en"
                 },
                 "tts": {
-                    "engine": "edge_tts",
+                    "engine": "f5_tts",
                     "voice": "zh-CN-XiaoxiaoNeural",
                     "language": "zh-CN",
                     "speed": 1.0,

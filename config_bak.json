@@ -57,7 +57,7 @@
         },
         "translation": {
             "engine": "nllb",
-            "model": "200M",
+            "model": "base",
             "source_language": "zh",
             "target_language": "en"
         },

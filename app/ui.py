@@ -7,14 +7,14 @@ from typing import Dict, Any
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QComboBox, QTabWidget, QTextEdit, QLineEdit,
-    QFileDialog, QProgressBar, QTableWidget, QTableWidgetItem, QHeaderView,
-    QGroupBox, QFormLayout, QCheckBox, QMessageBox, QSpinBox, QDoubleSpinBox,
-    QScrollArea, QSplitter, QFrame, QSlider
+     QProgressBar, QTableWidget, QTableWidgetItem, QHeaderView,
+    QGroupBox, QCheckBox, QMessageBox,
+     QSplitter, QSlider, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QTimer
 
 from utils.logger import logger
-from app.ui_interface import UIEventType, ui_manager
+from app.ui_interface import UIEventType, ui_manager, UICallbackID
 from app.ui_adapter import ui_adapter
 
 
@@ -23,8 +23,7 @@ class MainWindow(QMainWindow):
         """初始化主窗口"""
         try:
             super().__init__()
-            
-
+        
             # 获取管理器实例
             self.ui_manager = ui_manager
             self.ui_adapter = ui_adapter
@@ -50,15 +49,65 @@ class MainWindow(QMainWindow):
             # 更新模型状态
             self.refresh_model_status()
             
+            # 触发初始化事件 - 加载默认模型配置
+            self.ui_manager.trigger_event(UIEventType.SYSTEM_READY, {})
+            
+            # 初始化加载各引擎的模型版本
+            self._initialize_model_versions()
+            
         except Exception as e:
             logger.exception(f"初始化主窗口失败: {str(e)}")
             raise
+
+    def _initialize_model_versions(self):
+        """初始化加载所有引擎的模型版本"""
+        try:
+            logger.info("开始初始化模型版本列表...")
+            
+            # 加载TTS模型版本
+            current_tts_engine = self.tts_engine.currentText()
+            if current_tts_engine:
+                self.ui_manager.trigger_event(
+                    UIEventType.GET_MODEL_VERSIONS,
+                    {
+                        "engine_type": "tts",
+                        "engine_name": current_tts_engine,
+                        "callback_id": "tts"
+                    }
+                )
+            
+            # 加载ASR模型版本
+            current_asr_engine = self.realtime_asr_engine.currentText()
+            if current_asr_engine:
+                self.ui_manager.trigger_event(
+                    UIEventType.GET_MODEL_VERSIONS,
+                    {
+                        "engine_type": "asr",
+                        "engine_name": current_asr_engine,
+                        "callback_id": "realtime_asr"
+                    }
+                )
+            
+            # 加载单文件处理的ASR模型版本
+            if hasattr(self, 'file_asr_engine') and self.file_asr_engine.currentText():
+                self.ui_manager.trigger_event(
+                    UIEventType.GET_MODEL_VERSIONS,
+                    {
+                        "engine_type": "asr", 
+                        "engine_name": self.file_asr_engine.currentText(),
+                        "callback_id": "asr"
+                    }
+                )
+            
+            logger.info("模型版本列表初始化请求已发送")
+        except Exception as e:
+            logger.exception(f"初始化模型版本列表失败: {str(e)}")
     
     def _setup_ui(self):
         """设置UI界面"""
         # 设置窗口标题和大小
         self.setWindowTitle(self.ui_manager.config.get_config("app.name", "Voice Translate Pro"))
-        self.setMinimumSize(1200, 800)
+        self.setMinimumSize(800, 600)
         self.resize(1200, 800)
         
         # 创建主布局
@@ -112,6 +161,9 @@ class MainWindow(QMainWindow):
         
         # 错误事件
         self.ui_manager.register_event_handler(UIEventType.ERROR, self._handle_error)
+
+        # TTS语音事件
+        self.ui_manager.register_event_handler(UIEventType.TTS_VOICES_LOADED, self._handle_tts_voices_loaded)
     
     # =============== 事件处理器 ===============
     
@@ -242,7 +294,8 @@ class MainWindow(QMainWindow):
             
         except Exception as e:
             logger.exception(f"处理模型加载完成失败: {str(e)}")
-    
+
+
     def _handle_model_versions_loaded(self, data: Dict[str, Any]):
         """处理模型版本列表加载完成事件"""
         try:
@@ -251,24 +304,25 @@ class MainWindow(QMainWindow):
             callback_id = data.get("callback_id")
             versions = data.get("versions", [])
             current_model = data.get("current_model", "")
-            
+
             # 确定要更新的UI组件
             model_version_combobox = None
-            if callback_id == "tts_model_versions":
+            if callback_id == UICallbackID.TTS_MODEL_VERSIONS:
                 model_version_combobox = self.tts_model_version
-            elif callback_id == "asr_model_versions":
+            elif callback_id == UICallbackID.ASR_MODEL_VERSIONS:
                 model_version_combobox = self.realtime_asr_model_version
-            elif callback_id == "realtime_asr_model_versions":
+            elif callback_id == UICallbackID.REALTIME_ASR_MODEL_VERSIONS:
                 model_version_combobox = self.realtime_asr_model_version
-            
+
+
             # 更新UI
-            if model_version_combobox:
+            if model_version_combobox is not None:
                 model_version_combobox.clear()
-                
+
                 if versions:
                     model_version_combobox.addItems(versions)
                     model_version_combobox.setEnabled(True)
-                    
+
                     # 设置当前版本
                     if current_model in versions:
                         model_version_combobox.setCurrentText(current_model)
@@ -278,10 +332,10 @@ class MainWindow(QMainWindow):
                 else:
                     model_version_combobox.setEnabled(False)
                     model_version_combobox.addItem("无可用版本")
-            
+
         except Exception as e:
             logger.exception(f"处理模型版本列表加载完成失败: {str(e)}")
-    
+
     def _handle_model_set_result(self, data: Dict[str, Any]):
         """处理模型设置结果事件"""
         try:
@@ -292,6 +346,15 @@ class MainWindow(QMainWindow):
             error = data.get("error", "")
             
             if success:
+                # 更新配置
+                if callback_id == UICallbackID.SET_ASR_MODEL or callback_id == UICallbackID.SET_REALTIME_ASR_MODEL:
+                    self.ui_manager.config().update_config("asr.engine", engine_type)
+                    self.ui_manager.config().update_config("asr.model", model_version)
+
+                elif callback_id == UICallbackID.SET_TTS_MODEL:
+                    self.ui_manager.config().update_config("tts.engine", engine_type)
+                    self.ui_manager.config().update_config("tts.model", model_version)
+
                 logger.info(f"已切换到{engine_type}模型版本: {model_version}")
             else:
                 QMessageBox.warning(self, "警告", f"切换到模型版本失败: {error}")
@@ -433,7 +496,7 @@ class MainWindow(QMainWindow):
             # 准备参数
             source_language = self._extract_lang_code(self.single_src_lang.currentText())
             target_language = self._extract_lang_code(self.single_tgt_lang.currentText())
-            
+
             # 触发文件翻译事件
             self.ui_manager.trigger_event(
                 UIEventType.TRANSLATE_FILE,
@@ -441,17 +504,17 @@ class MainWindow(QMainWindow):
                     "audio_path": audio_path,
                     "source_language": source_language,
                     "target_language": target_language,
-                    "callback_id": "translate_audio_file"
+                    "callback_id": UICallbackID.TRANSLATE_AUDIO_FILE
                 }
             )
-            
+
             # 注册一次性事件处理器
             def handle_translation_result(data):
-                if data.get("callback_id") == "translate_audio_file":
+                if data.get("callback_id") == UICallbackID.TRANSLATE_AUDIO_FILE:
                     # 显示结果
                     translated_text = data.get("translated_text", "")
                     self.translated_text.setText(translated_text)
-                    
+
                     # 注销事件处理器
                     self.ui_manager.unregister_event_handler(UIEventType.TRANSLATION_RESULT, handle_translation_result)
             
@@ -475,22 +538,23 @@ class MainWindow(QMainWindow):
                 UIEventType.ERROR,
                 {"message": f"翻译失败: {str(e)}"}
             )
-    
+
+
     def update_tts_model_versions(self):
         """更新TTS模型版本列表"""
         try:
             engine_name = self.tts_engine.currentText()
-            
+
             # 触发获取模型列表事件
             self.ui_manager.trigger_event(
                 UIEventType.GET_MODEL_VERSIONS,
                 {
                     "engine_type": "tts",
                     "engine_name": engine_name,
-                    "callback_id": "tts_model_versions"
+                    "callback_id": UICallbackID.TTS_MODEL_VERSIONS
                 }
             )
-                
+
         except Exception as e:
             logger.exception(f"更新TTS模型版本列表失败: {str(e)}")
             self.tts_model_version.clear()
@@ -502,7 +566,7 @@ class MainWindow(QMainWindow):
         try:
             engine_name = self.tts_engine.currentText()
             model_version = self.tts_model_version.currentText()
-            
+
             if model_version and model_version != "无可用版本" and model_version != "获取失败":
                 # 触发设置模型事件
                 self.ui_manager.trigger_event(
@@ -511,10 +575,10 @@ class MainWindow(QMainWindow):
                         "engine_type": "tts",
                         "engine_name": engine_name,
                         "model_version": model_version,
-                        "callback_id": "set_tts_model"
+                        "callback_id": UICallbackID.SET_TTS_MODEL
                     }
                 )
-                
+
         except Exception as e:
             logger.exception(f"更新TTS模型版本失败: {str(e)}")
             QMessageBox.critical(self, "错误", f"更新TTS模型版本失败: {str(e)}")
@@ -523,29 +587,30 @@ class MainWindow(QMainWindow):
         """更新ASR模型版本列表"""
         try:
             engine_name = self.realtime_asr_engine.currentText()
-            
+
             # 触发获取模型列表事件
             self.ui_manager.trigger_event(
                 UIEventType.GET_MODEL_VERSIONS,
                 {
                     "engine_type": "asr",
                     "engine_name": engine_name,
-                    "callback_id": "asr_model_versions"
+                    "callback_id": UICallbackID.ASR_MODEL_VERSIONS
                 }
             )
-                
+
         except Exception as e:
             logger.exception(f"更新ASR模型版本列表失败: {str(e)}")
             self.realtime_asr_model_version.clear()
             self.realtime_asr_model_version.addItem("获取失败")
             self.realtime_asr_model_version.setEnabled(False)
     
+
     def update_asr_model(self):
         """更新ASR模型版本"""
         try:
             engine_name = self.realtime_asr_engine.currentText()
             model_version = self.realtime_asr_model_version.currentText()
-            
+
             if model_version and model_version != "无可用版本" and model_version != "获取失败":
                 # 触发设置模型事件
                 self.ui_manager.trigger_event(
@@ -554,10 +619,10 @@ class MainWindow(QMainWindow):
                         "engine_type": "asr",
                         "engine_name": engine_name,
                         "model_version": model_version,
-                        "callback_id": "set_asr_model"
+                        "callback_id": UICallbackID.SET_ASR_MODEL
                     }
                 )
-                
+
         except Exception as e:
             logger.exception(f"更新ASR模型版本失败: {str(e)}")
             QMessageBox.critical(self, "错误", f"更新ASR模型版本失败: {str(e)}")
@@ -566,29 +631,29 @@ class MainWindow(QMainWindow):
         """更新实时ASR模型版本列表"""
         try:
             engine_name = self.realtime_asr_engine.currentText()
-            
+
             # 触发获取模型列表事件
             self.ui_manager.trigger_event(
                 UIEventType.GET_MODEL_VERSIONS,
                 {
                     "engine_type": "asr",
                     "engine_name": engine_name,
-                    "callback_id": "realtime_asr_model_versions"
+                    "callback_id": UICallbackID.REALTIME_ASR_MODEL_VERSIONS
                 }
             )
-                
+
         except Exception as e:
             logger.exception(f"更新实时ASR模型版本列表失败: {str(e)}")
             self.realtime_asr_model_version.clear()
             self.realtime_asr_model_version.addItem("获取失败")
             self.realtime_asr_model_version.setEnabled(False)
-    
+
     def update_realtime_asr_model(self):
         """更新实时ASR模型版本"""
         try:
             engine_name = self.realtime_asr_engine.currentText()
             model_version = self.realtime_asr_model_version.currentText()
-            
+
             if model_version and model_version != "无可用版本" and model_version != "获取失败":
                 # 触发设置模型事件
                 self.ui_manager.trigger_event(
@@ -597,14 +662,14 @@ class MainWindow(QMainWindow):
                         "engine_type": "asr",
                         "engine_name": engine_name,
                         "model_version": model_version,
-                        "callback_id": "set_realtime_asr_model"
+                        "callback_id": UICallbackID.SET_REALTIME_ASR_MODEL
                     }
                 )
-                
+
         except Exception as e:
             logger.exception(f"更新实时ASR模型版本失败: {str(e)}")
             QMessageBox.critical(self, "错误", f"更新实时ASR模型版本失败: {str(e)}")
-    
+
     # =============== 定时器回调 ===============
     
     def update_status(self):
@@ -667,11 +732,18 @@ class MainWindow(QMainWindow):
     def create_realtime_tab(self):
         """创建实时翻译标签页"""
         widget = QWidget()
-        layout = QHBoxLayout(widget)
+        layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)  # 移除边距
+        
+        # 创建一个分割器，替换原来的QHBoxLayout
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(5)  # 设置分割线宽度
+        splitter.setChildrenCollapsible(False)  # 防止子控件被完全折叠
         
         # 左侧控制面板
         left_panel = QWidget()
+        left_panel.setMinimumWidth(300)  # 设置最小宽度
+        left_panel.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)  # 移除边距
         
@@ -742,12 +814,11 @@ class MainWindow(QMainWindow):
         
         # 添加TTS声音选择
         self.tts_voice = QComboBox()
-        self.update_tts_voices()
         tts_layout.addWidget(QLabel("TTS声音:"))
         tts_layout.addWidget(self.tts_voice)
         
         # tts声音要根据引擎的选择而改变
-        self.tts_engine.currentTextChanged.connect(self.update_tts_voices)
+        self.tts_engine.currentTextChanged.connect(self._request_tts_voices )
 
         
         # 添加TTS模型版本选择
@@ -795,11 +866,13 @@ class MainWindow(QMainWindow):
         control_group.setLayout(control_layout)
         left_layout.addWidget(control_group)
         
-        # 添加左侧面板到主布局
-        layout.addWidget(left_panel, 1)  # stretch factor = 1
+        # 添加左侧面板到分割器（不再使用layout.addWidget与stretch factor）
+        splitter.addWidget(left_panel)
         
         # 右侧翻译结果面板
         right_panel = QWidget()
+        right_panel.setMinimumWidth(500)  # 设置最小宽度
+        right_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)  # 移除边距
         
@@ -865,19 +938,110 @@ class MainWindow(QMainWindow):
         monitor_group.setLayout(monitor_layout)
         right_layout.addWidget(monitor_group)
         
-        # 添加右侧面板到主布局
-        layout.addWidget(right_panel, 2)  # stretch factor = 2
+        # 添加右侧面板到分割器（不再使用layout.addWidget与stretch factor）
+        splitter.addWidget(right_panel)
+        
+        # 设置初始大小比例为1:2
+        splitter.setSizes([1, 2])
+        
+        # 将分割器添加到主布局
+        layout.addWidget(splitter)
+
+        # 在返回标签页之前触发模型版本加载
+        current_asr_engine = self.realtime_asr_engine.currentText()
+        if current_asr_engine:
+            self.update_realtime_asr_model_versions()
+        
+        current_tts_engine = self.tts_engine.currentText()
+        if current_tts_engine:
+            self.update_tts_model_versions()
+
+
+        # 配置触发更新配置
+        # 检查语言选择器的变更事件
+        self.single_src_lang.currentIndexChanged.connect(self._on_source_language_changed)
+        self.single_tgt_lang.currentIndexChanged.connect(self._on_target_language_changed)
+
+        # 检查ASR引擎选择器的变更事件
+        self.realtime_asr_engine.currentIndexChanged.connect(self._on_asr_engine_changed)
+        self.realtime_asr_model_version.currentIndexChanged.connect(self._on_asr_model_changed)
+
+        # 检查TTS引擎选择器的变更事件
+        self.tts_engine.currentIndexChanged.connect(self._on_tts_engine_changed)
+        self.tts_model_version.currentIndexChanged.connect(self._on_tts_model_changed)
+
+        # 检查TTS声音选择器的变更事件
+        self.tts_voice.currentIndexChanged.connect(self._on_tts_voice_changed)
         
         return widget
+########################################触发配置更新############################################################
+    def _on_source_language_changed(self):
+        language = self._extract_lang_code(self.single_src_lang.currentText())
+        # 检查是否有这行代码
+        ui_manager.config.update_config("language.source", language)
+
+    def _on_target_language_changed(self):
+        language = self._extract_lang_code(self.single_tgt_lang.currentText())
+        # 检查是否有这行代码
+        ui_manager.config.update_config("language.target", language)
+
+    def _on_asr_engine_changed(self):
+        engine = self.realtime_asr_engine.currentText()
+        # 检查是否有这行代码
+        ui_manager.config.update_config("asr.engine", engine)
+
+    def _on_asr_model_changed(self):
+        model = self.realtime_asr_model_version.currentText()
+        # 检查是否有这行代码
+        ui_manager.config.update_config("asr.model", model)
+
+    def _on_tts_engine_changed(self):
+        engine = self.tts_engine.currentText()
+        # 检查是否有这行代码
+        ui_manager.config.update_config("tts.engine", engine)
+
+    def _on_tts_model_changed(self):
+        model = self.tts_model_version.currentText()
+        # 检查是否有这行代码
+        ui_manager.config.update_config("tts.model", model)
+
+    def _on_tts_voice_changed(self, index):
+        voice = self._extract_voice_name(self.tts_voice.currentText())
+        # 检查是否有这行代码
+        ui_manager.config.update_config("tts.voice", voice)
+
+    def _on_use_gpu_changed(self, state):
+        use_gpu = state == Qt.CheckState.Checked
+        # 检查是否有这行代码
+        ui_manager.config.update_config("system.use_gpu", use_gpu)
+
+    def _on_input_device_changed(self, index):
+        device = self.input_device.currentText()
+        # 检查是否有这行代码
+        ui_manager.config.update_config("audio.input_device", device)
+
+    def _on_output_device_changed(self, index):
+        device = self.output_device.currentText()
+        # 检查是否有这行代码
+        ui_manager.config.update_config("audio.output_device", device)
+
+####################################################################################################
 
     def create_single_tab(self):
         """创建单文件翻译标签页"""
         widget = QWidget()
-        layout = QHBoxLayout(widget)
+        layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)  # 移除边距
+        
+        # 创建一个分割器，替换原来的QHBoxLayout
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(5)  # 设置分割线宽度
+        splitter.setChildrenCollapsible(False)  # 防止子控件被完全折叠
         
         # 左侧控制面板
         left_panel = QWidget()
+        left_panel.setMinimumWidth(300)  # 设置最小宽度
+        left_panel.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)  # 移除边距
         
@@ -924,10 +1088,13 @@ class MainWindow(QMainWindow):
         # 添加一个弹性空间，让控件靠上对齐
         left_layout.addStretch(1)
         
-        layout.addWidget(left_panel, 1)  # stretch factor = 1
+        # 添加左侧面板到分割器
+        splitter.addWidget(left_panel)
         
         # 右侧结果面板
         right_panel = QWidget()
+        right_panel.setMinimumWidth(500)  # 设置最小宽度
+        right_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)  # 移除边距
         
@@ -955,7 +1122,14 @@ class MainWindow(QMainWindow):
         result_group.setLayout(result_layout)
         right_layout.addWidget(result_group)
         
-        layout.addWidget(right_panel, 2)  # stretch factor = 2
+        # 添加右侧面板到分割器
+        splitter.addWidget(right_panel)
+        
+        # 设置初始大小比例为1:2
+        splitter.setSizes([1, 2])
+        
+        # 将分割器添加到主布局
+        layout.addWidget(splitter)
         
         return widget
 
@@ -1081,6 +1255,16 @@ class MainWindow(QMainWindow):
         
         audio_group.setLayout(audio_layout)
         layout.addWidget(audio_group)
+
+
+        # 触发更新配置
+        # GPU设置
+        self.enable_gpu.stateChanged.connect(self._on_use_gpu_changed)
+
+        # 音频设备设置
+        self.input_device.currentIndexChanged.connect(self._on_input_device_changed)
+        self.output_device.currentIndexChanged.connect(self._on_output_device_changed)
+
         
         # 配置文件设置
         profile_group = QGroupBox("配置文件")
@@ -1254,35 +1438,7 @@ class MainWindow(QMainWindow):
     def _download_model_from_table(self, row):
         """从表格中下载模型"""
         try:
-            model_type = self.model_table.item(row, 0).text().lower()
-            model_name = self.model_table.item(row, 1).text()
-            
-            # 解析模型信息
-            engine_name = None
-            model_tag = None
-            
-            if model_name.startswith("whisper-"):
-                engine_name = "whisper"
-                model_tag = model_name.split("-")[1]
-            elif model_name.startswith("faster-whisper-"):
-                engine_name = "faster_whisper"
-                model_tag = model_name.split("-")[2]
-            elif model_name.startswith("vosk-"):
-                engine_name = "vosk"
-                model_tag = model_name.split("-")[1]
-            elif model_name.startswith("edge-tts-"):
-                engine_name = "edge_tts"
-                model_tag = model_name.split("-")[2]
-            elif model_name.startswith("xtts-"):
-                engine_name = "xtts"
-                model_tag = model_name.split("-")[1]
-            elif model_name.startswith("bark-"):
-                engine_name = "bark"
-                model_tag = model_name.split("-")[1]
-            elif model_name.startswith("nllb-"):
-                engine_name = "nllb"
-                model_tag = model_name.split("-")[1]
-                model_type = "translation"
+            engine_name, model_tag, model_type,model_name = self._parese_table_model_info(row)
             
             # 设置进度条的初始状态
             self.download_progress.setVisible(True)
@@ -1318,38 +1474,51 @@ class MainWindow(QMainWindow):
             # 清除当前下载信息
             self.current_download = None
 
+    def _parese_table_model_info(self,row):
+        model_type = self.model_table.item(row, 0).text().lower()
+        model_name = self.model_table.item(row, 1).text()
+
+        # 解析模型信息
+        engine_name = None
+        model_tag = None
+
+        if model_name.startswith("whisper-"):
+            engine_name = "whisper"
+            model_tag = model_name.split("-")[1]
+        elif model_name.startswith("faster-whisper-"):
+            engine_name = "faster_whisper"
+            model_tag = model_name.split("-")[2]
+        elif model_name.startswith("vosk-"):
+            engine_name = "vosk"
+            model_tag = model_name.split("-")[1]
+        elif model_name.startswith("edge-tts-"):
+            engine_name = "edge_tts"
+            model_tag = model_name.split("-")[2]
+        elif model_name.startswith("xtts-"):
+            engine_name = "xtts"
+            model_tag = model_name.split("-")[1]
+        elif model_name.startswith("yourtts-"):
+            engine_name = "yourtts"
+            model_tag = model_name.split("-")[1]
+
+        elif model_name.startswith("f5_tts-"):
+            engine_name = "f5_tts"
+            model_tag = model_name.split("-")[1]
+
+        elif model_name.startswith("bark-"):
+            engine_name = "bark"
+            model_tag = model_name.split("-")[1]
+        elif model_name.startswith("nllb-"):
+            engine_name = "nllb"
+            model_tag = model_name.split("-")[1]
+            model_type = "translation"
+
+        return engine_name, model_tag, model_type,model_name
+
     def _delete_model_from_table(self, row):
         """从表格中删除模型"""
         try:
-            model_type = self.model_table.item(row, 0).text().lower()
-            model_name = self.model_table.item(row, 1).text()
-            
-            # 解析模型信息
-            engine_name = None
-            model_tag = None
-            
-            if model_name.startswith("whisper-"):
-                engine_name = "whisper"
-                model_tag = model_name.split("-")[1]
-            elif model_name.startswith("faster-whisper-"):
-                engine_name = "faster_whisper"
-                model_tag = model_name.split("-")[2]
-            elif model_name.startswith("vosk-"):
-                engine_name = "vosk"
-                model_tag = model_name.split("-")[1]
-            elif model_name.startswith("edge-tts-"):
-                engine_name = "edge_tts"
-                model_tag = model_name.split("-")[2]
-            elif model_name.startswith("xtts-"):
-                engine_name = "xtts"
-                model_tag = model_name.split("-")[1]
-            elif model_name.startswith("bark-"):
-                engine_name = "bark"
-                model_tag = model_name.split("-")[1]
-            elif model_name.startswith("nllb-"):
-                engine_name = "nllb"
-                model_tag = model_name.split("-")[1]
-                model_type = "translation"
+            engine_name,  model_tag, model_type,model_name = self._parese_table_model_info(row)
             
             # 确认删除
             reply = QMessageBox.question(self, "确认删除", 
@@ -1375,50 +1544,16 @@ class MainWindow(QMainWindow):
     def _refresh_model_from_table(self, row):
         """刷新表格中的模型状态"""
         try:
-            model_type = self.model_table.item(row, 0).text()
-            model_name = self.model_table.item(row, 1).text()
-            
-            # 根据模型类型和名称确定正确的检查参数
-            model_type_key = None
-            engine_name = None
-            model_tag = None
-            
-            if model_type == "ASR":
-                model_type_key = "asr"
-                if model_name.startswith("whisper-"):
-                    engine_name = "whisper"
-                    model_tag = model_name.split("-")[1]
-                elif model_name.startswith("faster-whisper-"):
-                    engine_name = "faster_whisper"
-                    model_tag = model_name.split("-")[2]
-                elif model_name.startswith("vosk-"):
-                    engine_name = "vosk"
-                    model_tag = model_name.split("-")[1]
-            elif model_type == "TTS":
-                model_type_key = "tts"
-                if model_name.startswith("edge-tts-"):
-                    engine_name = "edge_tts"
-                    model_tag = model_name.split("-")[2]
-                elif model_name.startswith("xtts-"):
-                    engine_name = "xtts"
-                    model_tag = model_name.split("-")[1]
-                elif model_name.startswith("bark-"):
-                    engine_name = "bark"
-                    model_tag = model_name.split("-")[1]
-            elif model_type == "翻译":
-                model_type_key = "translation"
-                if model_name.startswith("nllb-"):
-                    engine_name = "nllb"
-                    model_tag = model_name.split("-")[1]
+            engine_name,  model_tag, model_type,model_name = self._parese_table_model_info(row)
             
             # 检查模型状态
-            if all([model_type_key, engine_name, model_tag]):
-                logger.info(f"检查模型状态: 类型={model_type_key}, 引擎={engine_name}, 标签={model_tag}")
+            if all([model_type, engine_name, model_tag]):
+                logger.info(f"检查模型状态: 类型={model_type}, 引擎={engine_name}, 标签={model_tag}")
                 
                 # 导入模型管理器
                 from utils.model_manager import model_manager
                 
-                if model_manager.is_model_downloaded(model_type_key, engine_name, model_tag):
+                if model_manager.is_model_downloaded(model_type, engine_name, model_tag):
                     status_item = QTableWidgetItem("已下载")
                     status_item.setBackground(Qt.GlobalColor.green)
                 else:
@@ -1444,24 +1579,47 @@ class MainWindow(QMainWindow):
                 self._refresh_model_from_table(row)
         except Exception as e:
             logger.exception(f"刷新模型状态失败: {str(e)}")
-    
-    def update_tts_voices(self):
+
+    def _handle_tts_voices_loaded(self, data: Dict[str, Any]):
+        """处理TTS声音列表加载完成事件"""
+        try:
+            engine_name = data.get("engine_name")
+            voices = data.get("voices", [])
+            callback_id = data.get("callback_id")
+
+            if callback_id == UICallbackID.TTS_VOICES:
+                # 更新声音列表
+                self.tts_voice.clear()
+
+                if voices:
+                    self.tts_voice.addItems(voices)
+                    self.tts_voice.setEnabled(True)
+                else:
+                    self.tts_voice.setEnabled(False)
+                    self.tts_voice.addItem("无可用声音")
+        except Exception as e:
+            logger.exception(f"处理TTS声音列表加载事件失败: {str(e)}")
+            self.tts_voice.clear()
+            self.tts_voice.addItem("default")  # 添加默认选项
+
+    def _request_tts_voices (self):
         """更新TTS声音列表"""
         try:
             # 获取当前选择的引擎
             engine = self.tts_engine.currentText().strip()
-            logger.info(f"更新TTS声音列表: 引擎={engine}")
-            
-            # 清空当前列表
-            self.tts_voice.clear()
-            
-            # 获取引擎对应的声音列表
-            voices = ui_manager.get_ui_datas_config("tts_voices").get(engine, [])
-            
-            self.tts_voice.addItems(voices)
-            
+            logger.info(f"请求TTS声音列表: 引擎={engine}")
+
+            # 触发获取声音列表事件
+            self.ui_manager.trigger_event(
+                UIEventType.GET_TTS_VOICES,
+                {
+                    "engine_name": engine,
+                    "callback_id": UICallbackID.TTS_VOICES
+                }
+            )
         except Exception as e:
-            logger.exception(f"更新TTS声音列表失败: {str(e)}")
+            logger.exception(f"请求TTS声音列表失败: {str(e)}")
+            self.tts_voice.clear()
             self.tts_voice.addItem("default")  # 添加默认选项
         
     def init_gpu_settings(self):
@@ -1482,32 +1640,62 @@ class MainWindow(QMainWindow):
             self.available_gpus = []
 
     def update_audio_devices(self):
-        """更新音频设备列表"""
+        """更新音频设备列表，支持虚拟设备过滤"""
         try:
             import sounddevice as sd
-            
+
             # 获取所有音频设备
             devices = sd.query_devices()
-            
+
             # 清空当前列表
             self.input_device.clear()
             self.output_device.clear()
-            
 
-            # 添加输入设备
+            # 过滤和去重用
+            input_seen = set()
+            output_seen = set()
+            # 常见虚拟设备关键词
+            virtual_keywords = ["Mapper", "Loopback", "虚拟", "Stereo Mix", "VoiceMeeter", "VB-Audio", "Bluetooth", "Find My"]
+
+            # 是否显示虚拟设备
+            show_virtual = True
+
+            # 输入设备
             for i, device in enumerate(devices):
+                name = device['name']
                 if device['max_input_channels'] > 0:
-                    name = f"{device['name']} (输入)"
-                    self.input_device.addItem(name, i)
-            
-            # 添加输出设备
+                    is_virtual = any(keyword.lower() in name.lower() for keyword in virtual_keywords)
+                    # 过滤虚拟设备
+                    if is_virtual and not show_virtual:
+                        continue
+                    # 去重
+                    key = (name, device['max_input_channels'])
+                    if key in input_seen:
+                        continue
+                    input_seen.add(key)
+                    display_name = f"{name} (输入, 索引:{i})"
+                    if is_virtual:
+                        display_name += " [虚拟]"
+                    self.input_device.addItem(display_name, i)
+
+            # 输出设备
             for i, device in enumerate(devices):
+                name = device['name']
                 if device['max_output_channels'] > 0:
-                    name = f"{device['name']} (输出)"
-                    self.output_device.addItem(name, i)
-            
-            logger.info(f"已更新音频设备列表: {len(devices)}个设备")
-            
+                    is_virtual = any(keyword.lower() in name.lower() for keyword in virtual_keywords)
+                    if is_virtual and not show_virtual:
+                        continue
+                    key = (name, device['max_output_channels'])
+                    if key in output_seen:
+                        continue
+                    output_seen.add(key)
+                    display_name = f"{name} (输出, 索引:{i})"
+                    if is_virtual:
+                        display_name += " [虚拟]"
+                    self.output_device.addItem(display_name, i)
+
+            logger.info(f"已更新音频设备列表: {len(input_seen)}个输入, {len(output_seen)}个输出 (虚拟设备{'已显示' if show_virtual else '已隐藏'})")
+
         except Exception as e:
             logger.exception(f"更新音频设备列表失败: {str(e)}")
 

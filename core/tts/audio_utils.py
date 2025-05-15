@@ -127,11 +127,13 @@ class AudioUtils:
     def validate_audio(audio: np.ndarray) -> bool:
         """验证音频数据是否有效"""
         try:
+
             if not isinstance(audio, np.ndarray):
                 logger.error("音频数据必须是numpy数组")
                 return False
                 
             if len(audio.shape) != 1:
+                logger.info(f"""{np.ndarray}""")
                 logger.error("音频数据必须是一维数组")
                 return False
                 

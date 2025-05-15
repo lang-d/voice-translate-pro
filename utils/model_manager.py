@@ -2,6 +2,7 @@ import os
 import json
 import requests
 import shutil
+from transformers import AutoTokenizer, AutoModel, AutoModelForSeq2SeqLM, AutoModelForCausalLM, AutoModelForSpeechSeq2Seq, AutoModelForAudioClassification
 from typing import Dict, Optional, Any
 from tqdm import tqdm
 from utils.config import config
@@ -63,6 +64,14 @@ class ModelManager:
 
             model_path  = model_info["save_path"]
 
+            # huggingface 下载的
+            if model_info.get("hf_model_id", None):
+                # 临时这样
+                locks_path = os.path.join(model_path, ".locks")
+                if os.path.exists(locks_path):
+                    return True
+                return False
+
             # 检查是否是多文件模型
             if "files" in model_info:
                 # 检查每个必需文件是否存在
@@ -77,6 +86,38 @@ class ModelManager:
         except Exception as e:
             logger.exception(f"检查模型下载状态失败: {str(e)}")
             return False
+
+
+
+    def download_hf_model(self,model_id: str, cache_dir: str, model_type: str = "auto"):
+        os.makedirs(cache_dir, exist_ok=True)
+
+        tokenizer = None
+
+        # if "yourtts" in model_id.lower():
+        #     # 用 pipeline 方式下载
+        #     from transformers import pipeline
+        #     _ = pipeline("text-to-speech", model=model_id, cache_dir=cache_dir)
+        #     return None, None
+
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model_id, cache_dir=cache_dir)
+        except  Exception:
+            logger.warning(f"未找到tokenizer: {model_id}")
+
+        if model_type == "auto":
+            model = AutoModel.from_pretrained(model_id, cache_dir=cache_dir)
+        elif model_type == "seq2seq":
+            model = AutoModelForSeq2SeqLM.from_pretrained(model_id, cache_dir=cache_dir)
+        elif model_type == "causal":
+            model = AutoModelForCausalLM.from_pretrained(model_id, cache_dir=cache_dir)
+        elif model_type == "speech":
+            model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, cache_dir=cache_dir)
+        elif model_type == "audio_classification":
+            model = AutoModelForAudioClassification.from_pretrained(model_id, cache_dir=cache_dir)
+        else:
+            model = AutoModel.from_pretrained(model_id, cache_dir=cache_dir)
+        return tokenizer, model
     
     def download_model(self, engine_type: str, engine_name: str, model_name: str, progress_callback=None) -> bool:
         """下载模型"""
@@ -86,6 +127,23 @@ class ModelManager:
             if not model_info:
                 logger.exception(f"未找到模型信息: {engine_type}/{engine_name}/{model_name}")
                 return False
+
+            # 判断是否为 Hugging Face Hub 模型
+            hf_model_id = model_info.get("hf_model_id", None)
+            if hf_model_id :
+                # 指定下载目录
+                cache_dir = model_info["save_path"]
+                model_type = model_info.get("hf_model_type", "auto")
+                try:
+                    logger.info(f"使用 transformers 下载 Hugging Face 模型: {hf_model_id} 到 {cache_dir}")
+                    self.download_hf_model(hf_model_id, cache_dir, model_type)
+                    logger.info(f"Hugging Face 模型下载完成: {hf_model_id}")
+                    if progress_callback:
+                        progress_callback(1.0)
+                    return True
+                except Exception as e:
+                    logger.exception(f"Hugging Face 模型下载失败: {str(e)}")
+                    return False
             
             model_path = model_info["save_path"]
             
@@ -306,15 +364,8 @@ class ModelManager:
     def delete_model(self, engine_type: str, engine_name: str, model_name: str) -> bool:
         """删除模型"""
         try:
-            model_dir = config.get_model_dir(engine_type)
-            if engine_type == "asr":
-                model_path = os.path.join(model_dir, engine_name, model_name)
-            elif engine_type == "translation":
-                model_path = os.path.join(model_dir, engine_name, model_name)
-            elif engine_type == "tts":
-                model_path = os.path.join(model_dir, engine_name, model_name)
-            else:
-                return False
+            model_info = self.get_model_info(engine_type, engine_name, model_name)
+            model_path = model_info["save_path"]
             
             if os.path.exists(model_path):
                 shutil.rmtree(model_path)

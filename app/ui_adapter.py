@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
+import json
+import queue
 import threading
 import os
 from typing import Dict, Any, Optional, List, Callable
@@ -10,8 +11,16 @@ from app.task_manager import (
     TaskStatus, TaskCommand, ModelDownloadTask
 )
 from utils.model_manager import ModelManager, model_manager
-from .ui_interface import UIManager, UIEventType, UIEvent, ui_manager
-from utils.config import config
+from .ui_interface import UIManager, UIEventType, UIEvent, ui_manager, UICallbackID
+
+# 将这段代码放在文件顶部，在其他导入语句之前
+import multiprocessing
+try:
+    # 显式设置多进程启动方法为 'spawn'，确保Windows上的一致性
+    multiprocessing.set_start_method('spawn')
+except RuntimeError:
+    # 如果已经设置了启动方法，则忽略
+    pass
 
 class UITaskAdapter:
     """UI与任务管理器的适配器，负责将UI事件转换为任务操作"""
@@ -95,46 +104,176 @@ class UITaskAdapter:
             UIEventType.UPDATE_STATUS,
             self._handle_update_status_request
         )
-    
+
+        ui_manager.register_event_handler(
+            UIEventType.SYSTEM_READY, 
+            self._handle_system_ready
+        )
+
+        ui_manager.register_event_handler(
+            UIEventType.GET_TTS_VOICES,
+            self._handle_get_tts_voices
+        )
+
+    def _handle_get_tts_voices(self, data: Dict[str, Any]):
+        """处理获取TTS声音列表事件"""
+        try:
+            engine_name = data.get("engine_name")
+            callback_id = data.get("callback_id")
+            
+            if not engine_name:
+                raise ValueError("缺少引擎名称")
+            
+            # 从配置中获取声音列表
+            voices = ui_manager.get_ui_datas_config("tts_voices").get(engine_name, [])
+            
+            # 触发声音列表加载完成事件
+            ui_manager.trigger_event(
+                UIEventType.TTS_VOICES_LOADED,
+                {
+                    "engine_name": engine_name,
+                    "voices": voices,
+                    "callback_id": callback_id
+                }
+            )
+            
+            logger.info(f"已获取TTS声音列表: {engine_name} - 找到{len(voices)}个声音")
+            return True
+        except Exception as e:
+            logger.exception(f"获取TTS声音列表失败: {str(e)}")
+            
+            # 触发返回事件，但返回空列表
+            ui_manager.trigger_event(
+                UIEventType.TTS_VOICES_LOADED,
+                {
+                    "engine_name": data.get("engine_name", ""),
+                    "voices": [],
+                    "callback_id": data.get("callback_id", "")
+                }
+            )
+            return False
+
+    def _handle_system_ready(self, data: Dict[str, Any]):
+        """处理系统就绪事件 - 加载所有初始数据"""
+        try:
+            logger.info("系统就绪，开始加载初始数据...")
+
+            # 获取配置中的引擎设置
+            tts_engine = ui_manager.config.get_config("tts.engine", "edge-tts")
+            asr_engine = ui_manager.config.get_config("asr.engine", "whisper")
+
+            # 触发模型版本获取事件
+            ui_manager.trigger_event(
+                UIEventType.GET_MODEL_VERSIONS,
+                {
+                    "engine_type": "tts",
+                    "engine_name": tts_engine,
+                    "callback_id": UICallbackID.TTS_MODEL_VERSIONS
+                }
+            )
+
+            ui_manager.trigger_event(
+                UIEventType.GET_MODEL_VERSIONS,
+                {
+                    "engine_type": "asr",
+                    "engine_name": asr_engine,
+                    "callback_id": UICallbackID.REALTIME_ASR_MODEL_VERSIONS
+                }
+            )
+
+            # 还可以加载其他必要的初始数据...
+
+            logger.info("初始数据加载请求已发送")
+            return True
+        except Exception as e:
+            logger.exception(f"处理系统就绪事件失败: {str(e)}")
+            return False
+
     def _handle_start_translation(self, data: Dict[str, Any]):
         """处理开始翻译事件"""
         try:
+            # 强制保存当前配置
+            ui_manager.config.save_to_system()
+
             # 获取翻译配置
             source_language = data.get("source_language", ui_manager.config.get_config("language.source", "zh"))
             target_language = data.get("target_language", ui_manager.config.get_config("language.target", "en"))
             input_device = data.get("input_device", "default")
             output_device = data.get("output_device", "default")
-            
+
+            # 获取用户设置的引擎配置（作为普通字典而非对象）
+            asr_config = ui_manager.config.get_config("asr", {})
+            translation_config = ui_manager.config.get_config("translation", {})
+            tts_config = ui_manager.config.get_config("tts", {})
+
+            # 确保配置是纯字典，深度复制避免任何引用问题
+            asr_config = dict(asr_config) if isinstance(asr_config, dict) else {}
+            translation_config = dict(translation_config) if isinstance(translation_config, dict) else {}
+            tts_config = dict(tts_config) if isinstance(tts_config, dict) else {}
+
             # 创建翻译任务
             translation_task = TranslationProcessTask(
                 source_language=source_language,
                 target_language=target_language,
                 input_device=input_device,
-                output_device=output_device
+                output_device=output_device,
+                asr_config=asr_config,
+                translation_config=translation_config,
+                tts_config=tts_config
             )
-            
-            # 添加状态更新回调
-            translation_task.on_progress(self._on_translation_progress)
-            translation_task.on_status_change(self._on_translation_status_change)
-            translation_task.on_complete(self._on_translation_complete)
-            translation_task.on_error(self._on_translation_error)
-            
-            # 启动翻译任务
+
+            # 检查模型可用性
+            availability = translation_task.check_availability()
+            if not availability.get("available", False):
+                # 通知UI显示错误
+                ui_manager.trigger_event(
+                    UIEventType.ERROR,
+                    {"message": availability.get("message")}
+                )
+
+                # 强行停止翻译
+                ui_manager.trigger_event(
+                    UIEventType.STOP_TRANSLATION,
+                    {}
+                )
+
+                return None
+
+            # 先提交任务，不添加回调
             task_id = self.task_manager.submit_task(translation_task)
-            self.active_translation_task_id = task_id
-            
-            # 启动状态监控任务
-            self._start_status_monitor()
-            
-            logger.info(f"已启动翻译任务 (ID: {task_id})")
-            
-            # 通知UI翻译已开始
-            ui_manager.trigger_event(
-                UIEventType.UPDATE_STATUS,
-                {"is_running": True, "task_id": task_id}
-            )
-            
-            return task_id
+
+            # 获取提交后的任务实例
+            task = self.task_manager.get_task(task_id)
+
+            # 然后为已提交的任务添加回调
+            if task:
+                task.on_progress(self._on_translation_progress)
+                task.on_status_change(self._on_translation_status_change)
+                task.on_complete(self._on_translation_complete)
+                task.on_error(self._on_translation_error)
+
+                self.active_translation_task_id = task_id
+
+                # 启动状态监控任务
+                self._start_status_monitor()
+
+                logger.info(f"已启动翻译任务 (ID: {task_id})")
+
+                # 通知UI翻译已开始
+                ui_manager.trigger_event(
+                    UIEventType.UPDATE_STATUS,
+                    {"is_running": True, "task_id": task_id}
+                )
+
+                return task_id
+            else:
+                logger.error("翻译任务创建失败")
+                ui_manager.trigger_event(
+                    UIEventType.ERROR,
+                    {"message": "翻译任务创建失败"}
+                )
+                return None
+
         except Exception as e:
             logger.exception(f"启动翻译任务失败: {str(e)}")
             ui_manager.trigger_event(
@@ -373,26 +512,35 @@ class UITaskAdapter:
         except Exception as e:
             logger.exception(f"系统退出处理失败: {str(e)}")
             return False
-    
+
     def _start_status_monitor(self):
         """启动状态监控任务"""
         try:
             # 如果已有状态监控任务，先停止
             self._stop_status_monitor()
-            
-            # 创建状态监控任务
+
+            # 创建一个更简单的状态监控任务实例
+            # 避免向任务传递任何复杂对象
             status_task = StatusMonitorTask()
-            
-            # 添加状态更新回调
-            status_task.on_progress(self._on_status_progress)
-            
-            # 提交任务
+
+            # 提交任务前不添加任何回调，而是在任务添加后手动处理回调
             task_id = self.task_manager.submit_task(status_task)
-            self.active_status_task_id = task_id
-            
-            logger.info(f"已启动状态监控任务 (ID: {task_id})")
-            
-            return task_id
+
+            # 获取任务实例 - 这是在主进程中创建并保存的对象
+            task = self.task_manager.get_task(task_id)
+
+            # 如果任务创建成功，再添加回调
+            if task:
+                # 添加状态更新回调
+                task.on_progress(self._on_status_progress)
+
+                self.active_status_task_id = task_id
+                logger.info(f"已启动状态监控任务 (ID: {task_id})")
+                return task_id
+            else:
+                logger.error("状态监控任务创建失败")
+                return None
+
         except Exception as e:
             logger.exception(f"启动状态监控任务失败: {str(e)}")
             return None
@@ -651,9 +799,7 @@ class UITaskAdapter:
                 UIEventType.UPDATE_STATUS,
                 current_status
             )
-            
-            logger.info("状态更新请求处理成功")
-            
+
             return True
         except Exception as e:
             logger.exception(f"更新状态请求处理失败: {str(e)}")
@@ -692,6 +838,8 @@ class UITaskAdapter:
                         if "status_data" in result:
                             # 合并状态数据
                             status.update(result["status_data"])
+                    except queue.Empty:
+                        pass
                     except Exception as e:
                         logger.exception(f"从任务获取状态数据失败: {str(e)}")
         
@@ -708,7 +856,7 @@ class UITaskAdapter:
                             if key in system_data:
                                 status[key] = system_data[key]
                 except Exception as e:
-                    logger.exception(f"从状态监控任务获取状态数据失败: {str(e)}")
+                    logger.warning(f"从状态监控任务获取状态数据失败: {str(e)}")
         
         return status
 

@@ -51,6 +51,32 @@ class UIEventType:
     # 音频设备事件
     DEVICE_CHANGED = "device_changed"
 
+    # 添加声音列表相关事件
+    GET_TTS_VOICES = "get_tts_voices"
+    TTS_VOICES_LOADED = "tts_voices_loaded"
+
+class UICallbackID:
+    """UI回调ID常量定义"""
+    # TTS相关回调
+    TTS_MODEL_VERSIONS = "tts_model_versions"  # 统一使用此ID获取TTS模型版本
+    SET_TTS_MODEL = "set_tts_model"
+
+    # ASR相关回调
+    ASR_MODEL_VERSIONS = "asr_model_versions"  # 用于非实时ASR的模型版本
+    REALTIME_ASR_MODEL_VERSIONS = "realtime_asr_model_versions"  # 用于实时ASR的模型版本
+    SET_ASR_MODEL = "set_asr_model"
+    SET_REALTIME_ASR_MODEL = "set_realtime_asr_model"
+
+    # 文件翻译相关回调
+    TRANSLATE_AUDIO_FILE = "translate_audio_file"
+
+    # 通用回调
+    DEFAULT = "default"
+    ERROR = "error"
+
+    # 添加声音列表相关回调ID
+    TTS_VOICES = "tts_voices"
+
 class UIConfigManager:
     """UI配置管理器，负责UI相关配置的管理和持久化"""
     
@@ -76,12 +102,8 @@ class UIConfigManager:
             ("ASR", "vosk-zh-large"),
             
             # TTS模型
-            ("TTS", "edge-tts-base"),
-            ("TTS", "xtts-base"),
-            ("TTS", "xtts-small"),
-            ("TTS", "bark-base"),
-            ("TTS", "bark-large"),
-            
+            ("TTS", "f5_tts-thai"),
+
             # 翻译模型
             ("翻译", "nllb-base"),
             ("翻译", "nllb-small"),
@@ -108,74 +130,14 @@ class UIConfigManager:
             "vosk"
         ],
         "tts_engine":[
-            "edge-tts",
-            "xtts",
-            "bark"
+            "f5_tts"
         ],
         "translation_engine":[
             "nllb"
         ],
         "tts_voices": {
-            "edge-tts": [
-                # 中文声音
-                "zh-CN-XiaoxiaoNeural (女声)",
-                "zh-CN-XiaoyiNeural (女声)",
-                "zh-CN-YunjianNeural (男声)",
-                "zh-CN-YunxiNeural (男声)",
-                "zh-CN-YunxiaNeural (男声)",
-                "zh-CN-YunyangNeural (男声)",
-                "zh-CN-liaoning-XiaobeiNeural (女声)",
-                "zh-CN-shaanxi-XiaoniNeural (女声)",
-                # 英文声音
-                "en-US-JennyNeural (女声)",
-                "en-US-GuyNeural (男声)",
-                "en-US-AriaNeural (女声)",
-                "en-US-DavisNeural (男声)",
-                "en-GB-SoniaNeural (英式女声)",
-                "en-GB-RyanNeural (英式男声)",
-                # 日语声音
-                "ja-JP-NanamiNeural (女声)",
-                "ja-JP-KeitaNeural (男声)",
-                "ja-JP-AoiNeural (女声)",
-                "ja-JP-DaichiNeural (男声)",
-                # 韩语声音
-                "ko-KR-SunHiNeural (女声)",
-                "ko-KR-InJoonNeural (男声)",
-                "ko-KR-JiMinNeural (女声)",
-                "ko-KR-SeoHyeonNeural (女声)",
-                # 泰语声音
-                "th-TH-NiwatNeural (男声)",
-                "th-TH-PremwadeeNeural (女声)",
-                "th-TH-AcharaNeural (女声)"
-            ],
-            "xtts": [
+            "f5_tts": [
                 "default (默认声音)",
-                "female_01 (女声1)",
-                "female_02 (女声2)",
-                "female_03 (女声3)",
-                "male_01 (男声1)",
-                "male_02 (男声2)",
-                "male_03 (男声3)"
-            ],
-            "bark": [
-                # 中文声音
-                "zh_speaker_0 (女声)",
-                "zh_speaker_1 (男声)",
-                "zh_speaker_2 (女声-活力)",
-                "zh_speaker_3 (男声-稳重)",
-                "zh_speaker_4 (女声-温柔)",
-                "zh_speaker_5 (男声-磁性)",
-                # 英文声音
-                "en_speaker_0 (女声)",
-                "en_speaker_1 (男声)",
-                "en_speaker_2 (女声-专业)",
-                "en_speaker_3 (男声-播音)",
-                # 日语声音
-                "ja_speaker_0 (女声)",
-                "ja_speaker_1 (男声)",
-                # 韩语声音
-                "ko_speaker_0 (女声)",
-                "ko_speaker_1 (男声)"
             ]
         }
         }
@@ -237,18 +199,29 @@ class UIConfigManager:
                 # 保存语言配置
                 if "language" in self._config:
                     self._system_config.set("user.language", self._config["language"])
+                    # 补充ASR语言配置
+                    self._system_config.set("user.asr.language", self._config["language"]["source"])
+                    # 补充翻译语言配置
+                    self._system_config.set("user.asr.translation", self._config["language"]["source"])
+                    self._system_config.set("user.asr.translation", self._config["language"]["target"])
+                    # 补充TTS语言配置
+                    self._system_config.set("user.tts.language",self._config["language"]["target"])
                     
                 # 保存ASR配置
                 if "asr" in self._config:
                     self._system_config.set("user.asr", self._config["asr"])
+                    self._system_config.set("user.asr.language", self._config["language"]["source"])
                     
                 # 保存翻译配置
                 if "translation" in self._config:
                     self._system_config.set("user.translation", self._config["translation"])
+                    self._system_config.set("user.asr.translation", self._config["language"]["source"])
+                    self._system_config.set("user.asr.translation", self._config["language"]["target"])
                     
                 # 保存TTS配置
                 if "tts" in self._config:
                     self._system_config.set("user.tts", self._config["tts"])
+                    self._system_config.set("user.tts.language",self._config["language"]["target"])
                 
                 # 保存到文件
                 self._system_config._save_config()
@@ -275,6 +248,13 @@ class UIConfigManager:
             # 通知观察者
             if notify:
                 self._notify_observers(key, value)
+
+                # 为关键配置自动保存
+            critical_keys = ["asr.engine", "asr.model", "tts.engine", "tts.model","tts.voice",
+                             "translation.engine", "translation.model"]
+            if key in critical_keys or any(key.startswith(prefix) for prefix in critical_keys):
+                self.save_to_system()
+                logger.debug(f"关键配置已更改并保存: {key}={value}")
     
     def update_config_dict(self, config_dict: Dict[str, Any], prefix: str = "", notify: bool = True):
         """批量更新配置项"""
@@ -457,4 +437,6 @@ class UIManager:
         return self._config_manager.get_ui_datas_config(key)
 
 # 全局UI管理器实例
-ui_manager = UIManager() 
+ui_manager = UIManager()
+
+__all__ = ['UIEvent', 'UIEventType', 'UICallbackID', 'UIConfigManager', 'UIManager', 'ui_manager']

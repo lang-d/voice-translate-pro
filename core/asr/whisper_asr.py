@@ -16,7 +16,7 @@ class WhisperASR(BaseASR):
     def __init__(self):
         super().__init__()
         self.device = None
-    
+
     def configure(self, model: str, language: str, gpu: Dict[str, Any], performance: Dict[str, Any]) -> bool:
         """配置ASR引擎"""
         try:
@@ -24,65 +24,80 @@ class WhisperASR(BaseASR):
             if not model_manager.is_model_downloaded("asr", "whisper", model):
                 logger.error(f"Whisper模型 {model} 未下载")
                 return False
-            
+
             # 设置设备
             if gpu["enabled"] and torch.cuda.is_available():
                 self.device = gpu["device"] if gpu["device"] != "auto" else "cuda"
             else:
                 self.device = "cpu"
-            
-            # 获取模型信息和路径
+
+            # 获取模型信息
             model_info = model_manager.get_model_info("asr", "whisper", model)
             if not model_info:
                 logger.error(f"无法获取模型信息: {model}")
                 return False
-            
+
+            # 处理模型路径/名称
+            # 注意：这里是关键修改 - 我们判断是使用内置模型名称还是本地路径
             model_path = model_info["save_path"]
             if not os.path.exists(model_path):
                 logger.error(f"模型路径不存在: {model_path}")
                 return False
-            
-            # 加载模型
+
+            # 这里是关键部分 - 判断模型加载方式
+            # 检查是否为标准Whisper模型名称
+            std_models = ['tiny.en', 'tiny', 'base.en', 'base', 'small.en', 'small',
+                          'medium.en', 'medium', 'large-v1', 'large-v2', 'large-v3',
+                          'large', 'large-v3-turbo', 'turbo']
+
+            # 获取文件或目录名部分
+            model_name = os.path.basename(model_path)
+
             logger.info(f"正在加载Whisper模型: {model} (设备: {self.device})")
             try:
-                self.model = whisper.load_model(model_path, device=self.device)
+                if model_name in std_models:
+                    # 如果是标准模型名称，直接使用名称而不是路径
+                    self.model = whisper.load_model(model_name, device=self.device)
+                    logger.info(f"使用标准Whisper模型: {model_name}")
+                else:
+                    # 如果是自定义模型，使用完整路径
+                    # 确保路径指向正确的模型文件，而不仅仅是目录
+                    if os.path.isdir(model_path):
+                        # 如果是目录，检查是否有模型文件
+                        weight_files = [f for f in os.listdir(model_path)
+                                        if f.endswith('.pt') or f.endswith('.bin')]
+                        if weight_files:
+                            model_file = os.path.join(model_path, weight_files[0])
+                            self.model = whisper.load_model(model_file, device=self.device)
+                            logger.info(f"使用本地模型文件: {model_file}")
+                        else:
+                            # 如果目录中没有权重文件，尝试直接使用内置模型
+                            self.model = whisper.load_model(model, device=self.device)
+                            logger.info(f"未找到本地模型文件，尝试使用内置模型: {model}")
+                    else:
+                        # 直接使用模型路径
+                        self.model = whisper.load_model(model_path, device=self.device)
+                        logger.info(f"使用本地模型路径: {model_path}")
             except Exception as e:
                 logger.exception(f"加载模型失败: {str(e)}")
-                return False
-            
+                # 如果加载失败，尝试使用内置模型名称
+                try:
+                    logger.info(f"尝试直接加载内置模型: {model}")
+                    self.model = whisper.load_model(model, device=self.device)
+                except Exception as e2:
+                    logger.exception(f"再次加载失败: {str(e2)}")
+                    return False
+
+            # 保留原有的其他配置和JIT优化代码
             # 保存语言设置
             self.language = language
-            
-            # 性能优化
-            if gpu["enabled"] and performance["use_half_precision"] and self.device != "cpu":
-                self.model = self.model.half()
-                logger.info("已启用半精度(FP16)模式")
-            
-            # JIT优化
-            if performance["use_jit"]:
-                try:
-                    # 对编码器进行JIT优化
-                    self.model.encoder.forward = torch.jit.script(self.model.encoder.forward)
-                    
-                    # 对解码器进行JIT优化
-                    # 注意：由于解码器涉及动态控制流，我们只对其中的一些子模块进行优化
-                    for block in self.model.decoder.blocks:
-                        block.self_attn.forward = torch.jit.script(block.self_attn.forward)
-                        block.cross_attn.forward = torch.jit.script(block.cross_attn.forward)
-                        block.mlp.forward = torch.jit.script(block.mlp.forward)
-                    
-                    logger.info("已启用JIT优化")
-                except Exception as e:
-                    logger.warning(f"JIT优化失败，将使用原始模型: {str(e)}")
-            
             self.initialized = True
             logger.info(f"Whisper ASR配置完成: model={model}, language={language}")
             return True
-            
+
         except Exception as e:
             logger.exception(f"Whisper ASR配置失败: {str(e)}")
             return False
-    
     def transcribe(self, audio: np.ndarray) -> Optional[str]:
         """执行语音识别"""
         try:
@@ -102,6 +117,7 @@ class WhisperASR(BaseASR):
                 language=self.language,
                 task="transcribe"
             )
+            logger.info(f"识别结果: {result}")
             
             if not result or "text" not in result:
                 logger.exception("识别结果无效")

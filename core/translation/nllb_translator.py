@@ -84,22 +84,19 @@ class NLLBTranslator(BaseTranslator):
             if not os.path.exists(model_path):
                 logger.error(f"模型路径不存在: {model_path}")
                 return False
+
+            hf_model_id = model_info["hf_model_id"]
+            cache_dir = model_path
             
             # 加载模型
             logger.info(f"正在加载NLLB模型: {model} (设备: {self.device})")
             try:
                 # 加载tokenizer
-                self.tokenizer = AutoTokenizer.from_pretrained(
-                    model_path,
-                    local_files_only=True,
-                    trust_remote_code=True
-                )
+                logger.info(f"正在加载NLLB model path :{model_path}")
+                self.tokenizer = AutoTokenizer.from_pretrained(hf_model_id, cache_dir=cache_dir)
                 
                 # 根据设备和性能配置选择最佳配置
-                model_kwargs = {
-                    "local_files_only": True,
-                    "trust_remote_code": True
-                }
+                model_kwargs = {"cache_dir":cache_dir}
                 
                 if self.device == "cuda":
                     model_kwargs.update({
@@ -115,7 +112,7 @@ class NLLBTranslator(BaseTranslator):
                     
                 # 加载模型
                 self.model = AutoModelForSeq2SeqLM.from_pretrained(
-                    model_path,
+                    hf_model_id, 
                     **model_kwargs
                 )
                 
@@ -158,10 +155,12 @@ class NLLBTranslator(BaseTranslator):
             tgt_lang_code = self.lang_map.get(self.target_language)
             
             try:
-                # 设置目标语言
+                # 设置源语言和目标语言
+                # self.tokenizer.src_lang = src_lang_code  # 添加这行
                 self.tokenizer.target_lang = tgt_lang_code
                 
-                # 编码输入
+                # 编码输入时指定源语言
+                encoded = self.tokenizer(text, src_lang=src_lang_code, return_tensors="pt", padding=True)
                 encoded = self.tokenizer(text, return_tensors="pt", padding=True)
                 encoded = {k: v.to(self.model.device) for k, v in encoded.items()}
                 
@@ -180,6 +179,8 @@ class NLLBTranslator(BaseTranslator):
                 translation = self.tokenizer.batch_decode(
                     generated_tokens, skip_special_tokens=True
                 )[0].strip()
+
+                logger.info(f"""翻译结果:{translation}""")
                 
                 # 更新缓存
                 self.translation_cache[cache_key] = translation

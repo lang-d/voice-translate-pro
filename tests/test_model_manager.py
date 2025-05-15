@@ -154,5 +154,6 @@ class TestModelManager(unittest.TestCase):
         self.assertTrue(0 <= progress <= 1)
         self.assertTrue(progress >= 0.99)  # 下载完成后进度应该接近1
 
+
 if __name__ == '__main__':
     unittest.main() 

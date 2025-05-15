@@ -1,14 +1,17 @@
 # utils/task_manager.py
-
+import queue
 import threading
 import multiprocessing as mp
-import time
 import uuid
 import os
 import signal
+import psutil
+import torch
+import time
 from enum import Enum
 from typing import Dict, List, Any, Optional, Callable, Union, Tuple
 from utils.logger import logger
+
 
 # 任务状态
 class TaskStatus(Enum):
@@ -60,13 +63,15 @@ class Task:
         self.end_time = None
         self._canceled = False
         self._paused = False
+
+        # 使用特殊的属性名，以便在序列化前清除
         self._lock = threading.RLock()
-        
+
         # 进程间通信
         if task_type == TaskType.PROCESS:
             self.command_queue = mp.Queue()
             self.result_queue = mp.Queue()
-        
+
         # 回调函数
         self._progress_callbacks = []
         self._status_callbacks = []
@@ -119,7 +124,7 @@ class Task:
                 # 触发错误回调
                 self._notify_error(str(e))
                         
-            logger.error(f"任务执行失败: {self.name} - {e}")
+            logger.exception(f"任务执行失败: {self.name} - {e}")
     
     
     def handle_command(self, command: TaskCommand, data: Any = None) -> bool:
@@ -293,6 +298,44 @@ class ProcessTask(Task):
         self.stop_event = mp.Event()
         self.command_queue = mp.Queue()
         self.result_queue = mp.Queue()
+
+        # 特殊标记，用于在序列化前保存回调
+        self._has_callbacks = False
+        self._temp_callbacks = None
+
+    def __getstate__(self):
+        """在序列化前准备状态"""
+        # 保存当前状态
+        state = self.__dict__.copy()
+
+        # 移除无法序列化的对象
+        if self._has_callbacks:
+            # 保存回调信息到临时变量
+            self._temp_callbacks = {
+                'progress': self._progress_callbacks,
+                'status': self._status_callbacks,
+                'complete': self._complete_callbacks,
+                'error': self._error_callbacks
+            }
+
+        # 从状态中删除锁和回调
+        state['_lock'] = None
+        state['_progress_callbacks'] = []
+        state['_status_callbacks'] = []
+        state['_complete_callbacks'] = []
+        state['_error_callbacks'] = []
+
+        return state
+
+    def __setstate__(self, state):
+        """反序列化后恢复状态"""
+        # 恢复状态
+        self.__dict__.update(state)
+
+        # 创建新的锁
+        self._lock = threading.RLock()
+
+        # 回调函数会在主进程中处理，子进程不需要
     
     def execute(self) -> Any:
         """
@@ -304,15 +347,31 @@ class ProcessTask(Task):
                 target=self._process_main,
                 args=(self.command_queue, self.result_queue, self.stop_event)
             )
-            self.process.daemon = True
+
+            # 启动前记录信息
+            logger.info(f"启动进程任务: {self.name}")
             self.process.start()
-            
-            # 等待进程就绪
+
+            # 等待进程就绪，增加超时时间和更好的错误处理
             try:
-                result = self.result_queue.get(timeout=10)  # 等待进程初始化
-                if result.get("status") != "ready":
-                    raise Exception(f"进程初始化失败: {result.get('error', '未知错误')}")
+                logger.info(f"等待进程任务就绪: {self.name}")
+                while True:
+                    try:
+                        result = self.result_queue.get(timeout=15)  # 增加超时时间
+                        if result.get("status") != "ready":
+                            error_msg = result.get("error", "未知错误")
+                            logger.error(f"进程初始化失败: {error_msg}")
+                            self._terminate_process()
+                            raise Exception(f"进程初始化失败: {error_msg}")
+
+                        logger.info(f"进程任务已就绪: {self.name}")
+                        break
+
+                    except queue.Empty:
+                        logger.warning(f"进程任务未就绪: {self.name}")
+
             except Exception as e:
+                logger.exception(f"等待进程就绪失败: {str(e)}")
                 self._terminate_process()
                 raise Exception(f"进程启动失败: {str(e)}")
             
@@ -348,7 +407,8 @@ class ProcessTask(Task):
                             self.command_queue.put({"command": "resume"})
                     
                     time.sleep(0.1)  # 避免CPU过载
-                    
+                except queue.Empty:
+                    pass
                 except Exception as e:
                     logger.error(f"进程任务监听错误: {str(e)}")
                     # 继续监听
@@ -377,7 +437,7 @@ class ProcessTask(Task):
             # 确保进程被终止
             if self.process and self.process.is_alive():
                 self._terminate_process()
-            raise
+            raise e
     
     def _process_main(self, command_queue, result_queue, stop_event):
         """
@@ -546,13 +606,90 @@ class ModelDownloadTask(Task):
 class TranslationProcessTask(ProcessTask):
 
     """翻译进程任务示例"""
-    
-    def __init__(self, source_language: str, target_language: str, input_device=None, output_device=None):
+
+    def __init__(self, source_language: str, target_language: str,
+                 input_device=None, output_device=None,
+                 asr_config=None, translation_config=None, tts_config=None):
         super().__init__(f"实时翻译: {source_language} -> {target_language}", TaskPriority.HIGH)
         self.source_language = source_language
         self.target_language = target_language
         self.input_device = input_device
         self.output_device = output_device
+        self.asr_config = asr_config or {}
+        self.translation_config = translation_config or {}
+        self.tts_config = tts_config or {}
+    def __getstate__(self):
+        """序列化时处理特殊属性"""
+        state = super().__getstate__()
+
+        # 确保配置是简单的字典
+        state['asr_config'] = dict(state['asr_config']) if state['asr_config'] else {}
+        state['translation_config'] = dict(state['translation_config']) if state['translation_config'] else {}
+        state['tts_config'] = dict(state['tts_config']) if state['tts_config'] else {}
+
+        return state
+
+    def check_availability(self):
+        """检查翻译任务是否可用"""
+        from utils.model_manager import model_manager
+
+        # 从配置中获取ASR引擎和模型
+        asr_engine = self.asr_config.get("engine", "whisper")
+        asr_model = self.asr_config.get("model", "base")
+
+        # 从配置中获取翻译引擎和模型
+        translation_engine = self.translation_config.get("engine", "nllb")
+        translation_model = self.translation_config.get("model", "base")
+
+        # 从配置中获取TTS引擎和模型
+        tts_engine = self.tts_config.get("engine", "edge-tts")
+        tts_model = self.tts_config.get("model", "")
+
+        # 检查ASR模型
+        asr_available = model_manager.is_model_downloaded("asr", asr_engine, asr_model)
+
+        # 检查翻译模型
+        translation_available = model_manager.is_model_downloaded("translation", translation_engine, translation_model)
+
+        # 检查TTS模型 - 根据引擎类型决定是否需要检查
+        tts_available = True
+        tts_model_info = None
+
+        # edge-tts不需要下载模型，但xtts和bark需要
+        if tts_engine == "f5_tts":
+            tts_available = model_manager.is_model_downloaded("tts", "f5_tts", tts_model)
+            if not tts_available:
+                tts_model_info = {"type": "tts", "engine": "f5_tts", "model": tts_model}
+        elif tts_engine == "bark":
+            tts_available = model_manager.is_model_downloaded("tts", "bark", tts_model)
+            if not tts_available:
+                tts_model_info = {"type": "tts", "engine": "bark", "model": tts_model}
+
+        missing_models = []
+
+        if not asr_available:
+            missing_models.append({"type": "asr", "engine": asr_engine, "model": asr_model})
+
+        if not translation_available:
+            missing_models.append({"type": "translation", "engine": translation_engine, "model": translation_model})
+
+        if not tts_available and tts_model_info:
+            missing_models.append(tts_model_info)
+
+        if missing_models:
+            return {
+                "available": False,
+                "message": f"""缺少必要的模型，请先下载: {', '.join([f"{m['type']}/{m['engine']}/{m['model']}" for m in missing_models])}""",
+                "missing_models": missing_models
+            }
+
+        return {
+            "available": True,
+            "message": "所有必要模型已准备就绪",
+            "asr_available": asr_available,
+            "translation_available": translation_available,
+            "tts_available": tts_available
+        }
     
     def _process_main(self, command_queue, result_queue, stop_event):
         """翻译进程实现"""
@@ -560,20 +697,31 @@ class TranslationProcessTask(ProcessTask):
             # 导入所需模块，在进程内部导入避免主进程初始化时的依赖问题
             from core.stream_processor import StreamProcessor
             import time
-            
+
             # 通知主进程就绪
             result_queue.put({"status": "ready"})
-            
+
             # 初始化流处理器
             processor = StreamProcessor()
+
+            # 应用配置
+            processor.configure(
+                self.asr_config,
+                self.translation_config,
+                self.tts_config
+            )
+
+            # 设置语言
             processor.set_languages(self.source_language, self.target_language)
-            
+
+            # 设置音频设备
             if self.input_device or self.output_device:
                 processor.set_audio_devices(
                     self.input_device or "default",
                     self.output_device or "default"
                 )
             
+
             # 启动翻译
             if not processor.start():
                 result_queue.put({
@@ -647,38 +795,6 @@ class TranslationProcessTask(ProcessTask):
             })
     
 
-        """检查翻译任务是否可用"""
-        # 检查模型可用性
-        from utils.model_manager import model_manager
-        
-        # 检查ASR模型
-        asr_available = model_manager.is_model_downloaded("asr", "whisper", "base")
-        
-        # 检查翻译模型
-        translation_available = model_manager.is_model_downloaded("translation", "nllb", "200M")
-        
-        # TTS通常不需要检查，因为edge_tts不需要下载模型
-        
-        if not asr_available:
-            return {
-                "available": False,
-                "message": "ASR模型未下载，请先下载模型",
-                "missing_models": [{"type": "asr", "engine": "whisper", "model": "base"}]
-            }
-            
-        if not translation_available:
-            return {
-                "available": False,
-                "message": "翻译模型未下载，请先下载模型",
-                "missing_models": [{"type": "translation", "engine": "nllb", "model": "200M"}]
-            }
-            
-        return {
-            "available": True,
-            "message": "所有必要模型已准备就绪",
-            "asr_available": asr_available,
-            "translation_available": translation_available
-        }
 
 class StatusMonitorTask(ProcessTask):
     """状态监控进程任务"""
@@ -688,16 +804,27 @@ class StatusMonitorTask(ProcessTask):
         self._last_cpu_time = 0
         self._last_gpu_time = 0
         self._update_interval = 1.0  # 更新间隔（秒）
+
+        logger.info("状态监控进程任务初始化完成")
+
+    def __getstate__(self):
+        """序列化时处理特殊属性"""
+        state = super().__getstate__()
+
+        # 无需特殊处理的属性
+
+        return state
         
     def _process_main(self, command_queue, result_queue, stop_event):
         """状态监控进程实现"""
         try:
-            import psutil
-            import torch
-            import time
-            
+
+            logger.info("状态监控进程任务开始运行")
+
             # 通知主进程就绪
             result_queue.put({"status": "ready"})
+
+            logger.info("状态监控进程就绪")
             
             # 初始状态
             status = {
@@ -778,6 +905,7 @@ class StatusMonitorTask(ProcessTask):
                     time.sleep(sleep_time)
             
         except Exception as e:
+            logger.exception(e)
             # 发送错误
             result_queue.put({
                 "status": "error",
@@ -852,24 +980,37 @@ class TaskManager:
             
             self.worker_threads = []
             logger.info("任务管理器已停止")
-    
+
     def submit_task(self, task: Task) -> str:
         """提交任务"""
         # 确保任务管理器已启动
         if not self.running:
             self.start()
-        
-        
+
+        # 如果是进程任务，标记有回调
+        if task.task_type == TaskType.PROCESS:
+            if hasattr(task, '_has_callbacks'):
+                task._has_callbacks = True
+
         # 添加任务到队列
         with self.queue_lock:
             self.tasks[task.id] = task
-            
+
             # 如果是进程任务，直接执行
             if task.task_type == TaskType.PROCESS:
                 # 在新线程中启动进程任务，以免阻塞主线程
                 def start_process_task():
+                    # 保存回调
+                    if hasattr(task, '_temp_callbacks') and task._temp_callbacks:
+                        # 恢复回调
+                        task._progress_callbacks = task._temp_callbacks['progress']
+                        task._status_callbacks = task._temp_callbacks['status']
+                        task._complete_callbacks = task._temp_callbacks['complete']
+                        task._error_callbacks = task._temp_callbacks['error']
+                        task._temp_callbacks = None
+
                     task.run()
-                    
+
                 thread = threading.Thread(target=start_process_task)
                 thread.daemon = True
                 thread.start()
@@ -880,7 +1021,7 @@ class TaskManager:
                 self.task_queue.sort(key=lambda t: t.priority.value)
                 # 通知有新任务
                 self.task_available.set()
-            
+
             logger.info(f"已提交任务: {task.name} (ID: {task.id}, 类型: {task.task_type.value})")
             return task.id
     

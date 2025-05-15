@@ -35,7 +35,9 @@
             "sample_rate": 16000,
             "channels": 1,
             "volume": 1.0
-        }
+        },
+        "input_device": "麦克风 (MICAudio-97i) (输入, 索引:1)",
+        "output_device": "扬声器 (Realtek(R) Audio) (输出, 索引:3)"
     },
     "paths": {
         "models": "models",
@@ -46,28 +48,30 @@
     "user": {
         "language": {
             "source": "zh",
-            "target": "en"
+            "target": "th"
         },
         "asr": {
             "engine": "whisper",
             "model": "base",
             "language": "zh",
             "use_cache": true,
-            "cache_path": "cache/asr"
+            "cache_path": "cache/asr",
+            "translation": "th"
         },
         "translation": {
             "engine": "nllb",
-            "model": "200M",
+            "model": "base",
             "source_language": "zh",
             "target_language": "en"
         },
         "tts": {
-            "engine": "edge_tts",
-            "voice": "zh-CN-XiaoxiaoNeural",
-            "language": "zh-CN",
+            "engine": "f5_tts",
+            "voice": "default",
+            "language": "th",
             "speed": 1.0,
             "use_enhancements": true,
-            "cache_path": "cache/tts"
+            "cache_path": "cache/tts",
+            "model": "thai"
         },
         "ui": {
             "theme": "light",
