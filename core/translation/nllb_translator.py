@@ -3,7 +3,7 @@
 
 import os
 import torch
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer,NllbTokenizer
 from typing import Optional, Dict, Any
 from utils.logger import logger
 from utils.model_manager import model_manager
@@ -93,7 +93,12 @@ class NLLBTranslator(BaseTranslator):
             try:
                 # 加载tokenizer
                 logger.info(f"正在加载NLLB model path :{model_path}")
-                self.tokenizer = AutoTokenizer.from_pretrained(hf_model_id, cache_dir=cache_dir)
+                self.tokenizer = NllbTokenizer.from_pretrained(
+                    hf_model_id,
+                    cache_dir=cache_dir,
+                    src_lang=self.lang_map.get(source_language),
+                    tgt_lang=self.lang_map.get(target_language)
+                )
                 
                 # 根据设备和性能配置选择最佳配置
                 model_kwargs = {"cache_dir":cache_dir}
@@ -136,63 +141,47 @@ class NLLBTranslator(BaseTranslator):
             return False
     
     def translate(self, text: str) -> Optional[str]:
-        """执行翻译"""
         try:
             if not self.initialized:
                 raise RuntimeError("翻译引擎未初始化")
-            
-            # 验证文本
             if not self._validate_text(text):
                 return None
-            
-            # 检查缓存
+
             cache_key = f"{text}_{self.source_language}_{self.target_language}"
             if cache_key in self.translation_cache:
                 return self.translation_cache[cache_key]
-            
-            # 获取语言代码
+
             src_lang_code = self.lang_map.get(self.source_language)
             tgt_lang_code = self.lang_map.get(self.target_language)
-            
-            try:
-                # 设置源语言和目标语言
-                # self.tokenizer.src_lang = src_lang_code  # 添加这行
-                self.tokenizer.target_lang = tgt_lang_code
-                
-                # 编码输入时指定源语言
-                encoded = self.tokenizer(text, src_lang=src_lang_code, return_tensors="pt", padding=True)
-                encoded = self.tokenizer(text, return_tensors="pt", padding=True)
-                encoded = {k: v.to(self.model.device) for k, v in encoded.items()}
-                
-                # 生成翻译
-                with torch.no_grad():
-                    generated_tokens = self.model.generate(
-                        **encoded,
-                        forced_bos_token_id=self.tokenizer.get_lang_id(tgt_lang_code),
-                        max_length=256,
-                        num_beams=5,
-                        length_penalty=1.0,
-                        early_stopping=True
-                    )
-                
-                # 解码输出
-                translation = self.tokenizer.batch_decode(
-                    generated_tokens, skip_special_tokens=True
-                )[0].strip()
 
-                logger.info(f"""翻译结果:{translation}""")
-                
-                # 更新缓存
-                self.translation_cache[cache_key] = translation
-                
-                return translation
-                
-            except Exception as e:
-                logger.exception(f"翻译过程失败: {str(e)}")
-                return None
-            
+            # 设置源语言
+            self.tokenizer.src_lang = src_lang_code
+
+            # 编码
+            encoded = self.tokenizer(text, return_tensors="pt", padding=True)
+            encoded = {k: v.to(self.model.device) for k, v in encoded.items()}
+
+            # 生成
+            with torch.no_grad():
+                generated_tokens = self.model.generate(
+                    **encoded,
+                    forced_bos_token_id=self.tokenizer.convert_tokens_to_ids(tgt_lang_code),
+                    max_length=256,
+                    num_beams=5,
+                    length_penalty=1.0,
+                    early_stopping=True
+                )
+
+            translation = self.tokenizer.batch_decode(
+                generated_tokens, skip_special_tokens=True
+            )[0].strip()
+
+            logger.info(f"""翻译结果:{translation}""")
+            self.translation_cache[cache_key] = translation
+            return translation
+
         except Exception as e:
-            logger.exception(f"翻译失败: {str(e)}")
+            logger.exception(f"翻译过程失败: {str(e)}")
             return None
     
     def cleanup(self) -> None:

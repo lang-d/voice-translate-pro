@@ -1,3 +1,6 @@
+from utils.common import trace_func
+
+
 
 def test_yourtts_download_model():
     # Load model directly
@@ -5,12 +8,84 @@ def test_yourtts_download_model():
     cache_dir = "models/tts/yourtts/base"
     model = AutoModel.from_pretrained("wannaphong/khanomtan-tts-v1.0",cache_dir=cache_dir)
 
+def test_f5_tts_direct():
+    print("test_f5_tts_direct")
+    """直接测试F5-TTS引擎"""
+    from core.tts.f5_tts_engine import F5TTSEngine
+    import soundfile as sf
+    import numpy as np
+    import torch
+
+    # 配置参数
+    gpu_config = {
+        "enabled": True,
+        "device": "cuda" if torch.cuda.is_available() else "cpu"
+    }
+    performance_config = {
+        "use_jit": False,
+        "use_fp16": False
+    }
+    audio_config = {
+        "input": {
+            "sample_rate": 16000,
+            "channels": 1
+        },
+        "output": {
+            "sample_rate": 16000,
+            "channels": 1
+        }
+    }
+
+    try:
+        # 初始化引擎
+        engine = F5TTSEngine()
+
+        # 配置引擎
+        ok = engine.configure(
+            model="thai",
+            voice="female_30",
+            language="th",
+            gpu=gpu_config,
+            performance=performance_config,
+            audio=audio_config
+        )
+
+        if not ok:
+            print("引擎配置失败")
+            return
+
+        # 测试文本
+        test_text = "ถ้าใครอยากดื่มน้ําสักแก้ว ก็สามารถเล่นกับประชาชนของเราได้ในขณะนี้"
+
+        print("开始合成...")
+        # 执行合成
+        audio = engine.synthesize(test_text)
+
+        if audio is None:
+            print("合成失败")
+            return
+
+        # 保存音频
+        output_path = r"D:\github\voice-translate-pro\output\audio\test_direct.wav"
+        if audio.dtype != np.float32:
+            audio = audio.astype(np.float32)
+        sf.write(output_path, audio, audio_config["output"]["sample_rate"])
+        print(f"合成完成，已保存到: {output_path}")
+
+        # 清理资源
+        # engine.cleanup()
+
+    except Exception as e:
+        print(f"测试过程出错: {e}")
+        import traceback
+        traceback.print_exc()
+
 def test_f5_tts():
+    print("test_f5_tts")
     import torch
     import numpy as np
     import soundfile as sf
     from omegaconf import OmegaConf
-
     from f5_tts.infer.utils_infer import (
         preprocess_ref_audio_text,
         load_model,
@@ -22,24 +97,31 @@ def test_f5_tts():
         hop_length,
         win_length,
         n_mel_channels,
+        infer_batch_process,
     )
     from f5_tts.model import DiT
     from f5_tts.model.utils import seed_everything
 
-    # ========== 路径配置 ==========
-    MODEL_PATH = r"/models/tts/f5_tts/thai/model.pt"
-    VOCAB_PATH = r"D:\github\voice-translate-pro\models\tts\f5_tts\thai\vocab.txt"
-    REF_AUDIO_PATH = r"D:\github\voice-translate-pro\tests\ref.wav"
-    REF_TEXT = "ได้รับข่าวคราวของเราที่จะหาที่มันเป็นไปที่จะจัดขึ้น."  # 替换为你的参考语音的内容
-    GEN_TEXT = "สวัสดีค่ะ ยินดีต้อนรับเข้าสู่ร้านของเรา หวังว่าคุณจะมีความสุขกับการเลือกซื้อสินค้าในวันนี้"
-    OUTPUT_PATH = f"""output_{2}.wav"""
+
+
+
+
+# ========== 路径配置 ==========
+    model_path = r"D:\github\voice-translate-pro\models\tts\f5_tts\thai\model.pt"
+    vocab_path = r"D:\github\voice-translate-pro\models\tts\f5_tts\thai\vocab.txt"
+    ref_audio_path = r"D:\github\voice-translate-pro\models\tts\f5_tts\thai\voice\female_30.mp3"
+    REF_TEXT_PATH = r"D:\github\voice-translate-pro\models\tts\f5_tts\thai\voice\female_30.txt"
+    with open(REF_TEXT_PATH, "r", encoding="utf-8") as f:
+        ref_text = f.read()
+    GEN_TEXT = "ถ้าใครอยากดื่มน้ําสักแก้ว ก็สามารถเล่นกับประชาชนของเราได้ในขณะนี้ เราก็เพิ่งเริ่มต้นแล้วครับ เด็กๆ วันนี้ผมเตรียมให้คุณดูสิ่งที่ครูคุณไม่เคยเห็นมาก่อน 2 วันที่แล้ว"
+    OUTPUT_PATH = r"""D:\github\voice-translate-pro\output/audio/output_8.wav"""
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     mel_spec_type = "vocos"
     tokenizer = "custom"
 
     # ========== 加载 tokenizer ==========
-    vocab_char_map, vocab_size = get_tokenizer(VOCAB_PATH, tokenizer)
+    vocab_char_map, vocab_size = get_tokenizer(vocab_path, tokenizer)
 
     # ========== 模型参数配置 ==========
     model_cfg = dict(
@@ -56,9 +138,9 @@ def test_f5_tts():
     model = load_model(
         model_cls=DiT,
         model_cfg=model_cfg,
-        ckpt_path=MODEL_PATH,
+        ckpt_path=model_path,
         mel_spec_type=mel_spec_type,
-        vocab_file=VOCAB_PATH,
+        vocab_file=vocab_path,
         use_ema=True,
         device=device
     )
@@ -68,7 +150,9 @@ def test_f5_tts():
     vocoder = load_vocoder(vocoder_name=mel_spec_type, is_local=False, device=device)
 
     # ========== 加载参考音频 ==========
-    ref_audio_tensor, ref_text_proc = preprocess_ref_audio_text(REF_AUDIO_PATH, REF_TEXT)
+    ref_audio_tensor, ref_text_proc = preprocess_ref_audio_text(ref_audio_path, ref_text)
+
+    print(f"""ref_audio_tensor:{ref_audio_tensor},ref_text_proc:{ref_text_proc}""")
 
     # ========== 合成语音 ==========
     print("🎙 开始合成语音...")
@@ -92,21 +176,21 @@ def test_f5_tts():
 
 
     audio, sample_rate, _ = infer_process(
-            ref_audio=ref_audio_tensor,
-            ref_text=ref_text_proc,
-            gen_text=GEN_TEXT,
-            model_obj=model,
-            vocoder=vocoder,
-            mel_spec_type=mel_spec_type,
-            target_rms=target_rms,
-            cross_fade_duration=cross_fade_duration,
-            nfe_step=nfe_step,
-            cfg_strength=cfg_strength,
-            sway_sampling_coef=sway_sampling_coef,
-            speed=speed,
-            fix_duration=fix_duration,
-            device=torch.device(device)
-        )
+                ref_audio=ref_audio_tensor,
+                ref_text=ref_text_proc,
+                gen_text=GEN_TEXT,
+                model_obj=model,
+                vocoder=vocoder,
+                mel_spec_type=mel_spec_type,
+                target_rms=target_rms,
+                cross_fade_duration=cross_fade_duration,
+                nfe_step=nfe_step,
+                cfg_strength=cfg_strength,
+                sway_sampling_coef=sway_sampling_coef,
+                speed=speed,
+                fix_duration=fix_duration,
+                device=torch.device(device)
+            )
 
     # ========== 保存结果 ==========
     sf.write(OUTPUT_PATH, audio, sample_rate)
@@ -216,5 +300,11 @@ def test_live_f5_tts():
         output_path=OUTPUT_PATH,
         use_cuda=True,
     )
+
+def test_diff():
+    test_f5_tts_direct()
+    print("===========================================================================================")
+    test_f5_tts()
+
 
 

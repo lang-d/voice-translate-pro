@@ -5,6 +5,9 @@ import os
 import numpy as np
 import soundfile as sf
 from typing import Optional, Tuple, List
+
+import torch
+import torchaudio
 from scipy import signal
 from utils.logger import logger
 from utils.config import config
@@ -88,6 +91,36 @@ class AudioUtils:
         except Exception as e:
             logger.exception(f"加载音频文件失败: {str(e)}")
             return None
+
+    @staticmethod
+    def ensure_wav_1d_float32(audio):
+        if isinstance(audio, torch.Tensor):
+            audio = audio.detach().cpu().numpy()
+        if isinstance(audio, (list, tuple)):
+            if len(audio) == 1 and isinstance(audio[0], np.ndarray):
+                audio = audio[0]
+            else:
+                audio = np.array(audio).flatten()
+        audio = np.array(audio).astype(np.float32).flatten()
+        return audio
+
+
+    @staticmethod
+    def resample_audio(audio, orig_sr, target_sr):
+        # audio: np.ndarray, shape [n,] or [c, n]
+        # orig_sr: 原始采样率
+        # target_sr: 目标采样率
+        if isinstance(audio, np.ndarray):
+            audio_tensor = torch.from_numpy(audio)
+        else:
+            audio_tensor = audio
+        # 如果是一维，升维到[c, n]
+        if audio_tensor.ndim == 1:
+            audio_tensor = audio_tensor.unsqueeze(0)
+        resampler = torchaudio.transforms.Resample(orig_sr, target_sr)
+        audio_resampled = resampler(audio_tensor)
+        return audio_resampled.squeeze().cpu().numpy()
+
 
     @staticmethod
     def save_audio(audio_data: np.ndarray, sample_rate: int, file_path: str, 

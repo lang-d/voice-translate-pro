@@ -1,10 +1,21 @@
 import os
 from typing import Dict, Any, Optional
 
+from f5_tts.infer.utils_infer import (
+    preprocess_ref_audio_text,
+    load_model,
+    load_vocoder,
+    get_tokenizer,
+    infer_process,
+    infer_batch_process,
+)
+from f5_tts.model import DiT
+from f5_tts.model.utils import seed_everything
+
 import numpy as np
 import torch
 
-from core.tts import BaseTTSEngine
+from core.tts import BaseTTSEngine, AudioUtils
 from utils.logger import logger
 from utils.model_manager import model_manager
 
@@ -20,6 +31,10 @@ class F5TTSEngine(BaseTTSEngine):
         self.vocab_size = None
         self.ref_audio_tensor = None
         self.ref_text_proc = None
+        self.mel_spec_type = "vocos"
+
+        self.voice = None
+        self.ref_tetx = None
     
     def configure(self, model: str, voice: str, language: str, gpu: Dict[str, Any], 
                  performance: Dict[str, Any], audio: Dict[str, Any]) -> bool:
@@ -41,8 +56,6 @@ class F5TTSEngine(BaseTTSEngine):
 
             model_info = model_manager.get_model_info("tts", "f5_tts", model)
 
-            # 先固定，todo
-            voice = "default.wav"
 
             voice = f"""{model_info["save_path"]}/voice/{voice}"""
 
@@ -51,7 +64,7 @@ class F5TTSEngine(BaseTTSEngine):
                 return False
             
             self.initialized = True
-            logger.info(f"F5-TTS配置完成: 模型={model}, 参考音频={voice}, 语言={language}")
+            logger.info(f"F5-TTS配置完成: 模型={model}, 参考音频={voice}, 语言={language}，设备={self.device}")
             return True
             
         except Exception as e:
@@ -61,8 +74,7 @@ class F5TTSEngine(BaseTTSEngine):
     def _load_model(self, model_name: str) -> bool:
         """加载F5-TTS模型"""
         try:
-            from f5_tts.infer.utils_infer import load_model, load_vocoder, get_tokenizer
-            from f5_tts.model import DiT
+
             
             # 获取模型信息
             model_info = model_manager.get_model_info("tts", "f5_tts", model_name)
@@ -70,15 +82,15 @@ class F5TTSEngine(BaseTTSEngine):
                 logger.error(f"未找到模型信息: f5_tts/{model_name}")
                 return False
             
-            model_path = os.path.join(model_info["save_path"], "model.pt")
-            vocab_path = os.path.join(model_info["save_path"], "vocab.txt")
+            self.model_path = model_path = os.path.join(model_info["save_path"], "model.pt")
+            self.vocab_path = vocab_path = os.path.join(model_info["save_path"], "vocab.txt")
             
             if not os.path.exists(model_path) or not os.path.exists(vocab_path):
                 logger.error(f"模型文件或词汇表文件不存在")
                 return False
             
             # 加载tokenizer
-            self.vocab_char_map, self.vocab_size = get_tokenizer(vocab_path, "custom")
+            vocab_char_map, vocab_size = get_tokenizer(vocab_path, "custom")
             
             # 模型参数配置
             model_cfg = dict(
@@ -104,7 +116,7 @@ class F5TTSEngine(BaseTTSEngine):
             self.model.eval()
             
             # 加载vocoder
-            self.vocoder = load_vocoder(vocoder_name="vocos", is_local=False, device=self.device)
+            self.vocoder = load_vocoder(vocoder_name=self.mel_spec_type, is_local=False, device=self.device)
             
             logger.info("F5-TTS模型加载成功")
             return True
@@ -118,31 +130,40 @@ class F5TTSEngine(BaseTTSEngine):
     def _set_voice(self, voice: str) -> bool:
         """设置参考音频"""
         try:
-            from f5_tts.infer.utils_infer import preprocess_ref_audio_text
-            
+            # 自动补全后缀
             if not os.path.exists(voice):
-                logger.error(f"参考音频文件不存在: {voice}")
+                # 尝试加.wav
+                if os.path.exists(voice + ".wav"):
+                    voice = voice + ".wav"
+                elif os.path.exists(voice + ".mp3"):
+                    voice = voice + ".mp3"
+                else:
+                    logger.error(f"参考音频文件不存在: {voice}(.wav/.mp3)")
+                    return False
+
+            txt_path = f"""{voice.rsplit('.', 1)[0]}.txt"""
+            if not os.path.exists(txt_path):
+                logger.error(f"参考音频对应的文本文件不存在: {txt_path}")
                 return False
-            
-            # 这里需要提供参考音频对应的文本
-            # 实际应用中可能需要从配置中读取或使用默认文本
-            # 泰语示例文本,todo 先固定
-            ref_text = "ได้รับข่าวคราวของเราที่จะหาที่มันเป็นไปที่จะจัดขึ้น."
-            
+
+            with open(txt_path, "r", encoding="utf-8") as f:
+                ref_text = f.read()
+
+            self.ref_tetx = ref_text
+            logger.info(f"已加载参考音频文本: {ref_text}")
+            self.voice = voice
+
             # 处理参考音频
             self.ref_audio_tensor, self.ref_text_proc = preprocess_ref_audio_text(voice, ref_text)
-            logger.info(f"已设置参考音频: {voice}")
+            logger.info(f"已设置参考音频: {voice},{self.ref_audio_tensor}")
             return True
-            
+
         except Exception as e:
             logger.exception(f"设置参考音频失败: {str(e)}")
             return False
     
     def synthesize(self, text: str) -> Optional[np.ndarray]:
-        """执行语音合成"""
         try:
-
-
             if not self.initialized:
                 raise RuntimeError("F5-TTS引擎未初始化")
 
@@ -153,12 +174,8 @@ class F5TTSEngine(BaseTTSEngine):
                 logger.error("参考音频未设置")
                 return None
 
-            from f5_tts.infer.utils_infer import infer_process
-            from f5_tts.model.utils import seed_everything
-
             # 设置随机种子确保结果一致性
             seed_everything(42)
-
 
             logger.info(f"正在执行F5-TTS语音合成: 文本={text}")
 
@@ -171,14 +188,13 @@ class F5TTSEngine(BaseTTSEngine):
             target_rms = -18.0
             fix_duration = None
 
-            # 执行合成
             audio, sample_rate, _ = infer_process(
                 ref_audio=self.ref_audio_tensor,
                 ref_text=self.ref_text_proc,
                 gen_text=text,
                 model_obj=self.model,
                 vocoder=self.vocoder,
-                mel_spec_type="vocos",
+                mel_spec_type=self.mel_spec_type,
                 target_rms=target_rms,
                 cross_fade_duration=cross_fade_duration,
                 nfe_step=nfe_step,
@@ -189,18 +205,22 @@ class F5TTSEngine(BaseTTSEngine):
                 device=torch.device(self.device)
             )
 
-            # 确保返回适当格式的音频数据
-            audio_data = np.array(audio)
-
             # 验证音频
-            if not self._validate_audio(audio_data):
+            if not self._validate_audio(audio):
                 return None
 
-            # 音频增强
-            audio_data = self._enhance_audio(audio_data)
+            # 确保音频格式正确
+            audio = AudioUtils.ensure_wav_1d_float32(audio)
 
-            return audio_data
-            
+            # 重采样到目标采样率
+            audio = AudioUtils.resample_audio(audio, sample_rate, self.sample_rate)
+
+            # 音频增强
+            audio = self._enhance_audio(audio)
+
+            return audio
+                
+
         except Exception as e:
             logger.exception(f"语音合成失败: {str(e)}")
             return None

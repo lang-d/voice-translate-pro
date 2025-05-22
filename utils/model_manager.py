@@ -21,8 +21,35 @@ class ModelManager:
     def __init__(self):
         if not hasattr(self, 'initialized'):
             self.initialized = True
-            self.model_info_file = "models/model_info.json"
+            project_root,_ = self.get_abs_path()
+            self.model_info_file = os.path.join(project_root, "models", "model_info.json")
+            self.model_info = {}
             self._load_model_info()
+
+    def get_abs_path(self)->tuple[str,str]:
+        """
+        获取项目根目录
+        """
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.abspath(os.path.join(base_dir, ".."))
+        return project_root,base_dir
+
+    def fix_save_path_to_abs(self):
+        """
+        将self.model_info中所有模型的save_path字段替换为绝对路径
+        """
+        if not self.model_info:
+            return
+        # 获取项目根目录
+        project_root,base_dir = self.get_abs_path()
+        for engine_type in self.model_info:
+            for engine_name in self.model_info[engine_type]:
+                for model_name in self.model_info[engine_type][engine_name]:
+                    model = self.model_info[engine_type][engine_name][model_name]
+                    save_path = model.get("save_path", "")
+                    if save_path and not os.path.isabs(save_path):
+                        abs_path = os.path.abspath(os.path.join(project_root, save_path))
+                        model["save_path"] = abs_path
     
     def _load_model_info(self):
         """加载模型信息"""
@@ -30,10 +57,16 @@ class ModelManager:
             if os.path.exists(self.model_info_file):
                 with open(self.model_info_file, 'r', encoding='utf-8') as f:
                     self.model_info = json.load(f)
+                    self.fix_save_path_to_abs()
+                    logger.info(f"模型信息加载成功")
+
+            else:
+                raise FileNotFoundError("模型信息文件不存在")
+
         except Exception as e:
             logger.exception(f"加载模型信息失败: {str(e)}")
             self.model_info = {}
-    
+
     def get_model_info(self, engine_type: str, engine_name: str, model_name: str=None) -> Optional[Dict[str, Any]]:
         """获取模型信息"""
         try:

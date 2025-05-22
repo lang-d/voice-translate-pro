@@ -117,8 +117,7 @@ class WhisperASR(BaseASR):
                 language=self.language,
                 task="transcribe"
             )
-            logger.info(f"识别结果: {result}")
-            
+
             if not result or "text" not in result:
                 logger.exception("识别结果无效")
                 return None

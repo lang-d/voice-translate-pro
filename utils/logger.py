@@ -28,7 +28,7 @@ class Logger:
             
             # 设置日志格式
             self.formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+                '%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
             )
             
             # 初始化日志处理器

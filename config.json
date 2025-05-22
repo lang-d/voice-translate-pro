@@ -36,8 +36,8 @@
             "channels": 1,
             "volume": 1.0
         },
-        "input_device": "麦克风 (MICAudio-97i) (输入, 索引:1)",
-        "output_device": "扬声器 (Realtek(R) Audio) (输出, 索引:3)"
+        "input_device": "Microsoft Sound Mapper - Input (输入, 索引:0) [虚拟]",
+        "output_device": "Microsoft Sound Mapper - Output (输出, 索引:2) [虚拟]"
     },
     "paths": {
         "models": "models",
